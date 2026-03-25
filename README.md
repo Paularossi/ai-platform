@@ -9,7 +9,74 @@ Rather than treating model predictions as static, the platform models annotation
 
 While the initial application focuses on multimodal advertisement annotation (image and text), the system is designed to be task-agnostic, supporting a wide range of classification, evaluation, and revision tasks through configurable schemas and instruction sets.
 
-## System Design
+
+## 📁 Repository Structure
+
+```
+ai-platform/
+├── app/                                     # Streamlit UI for configuring and running experiments
+│   ├── Main.py                              # App entry point
+│   ├── components/                          # Placeholder for shared UI components (currently empty)
+│   └── pages/                               # Individual Streamlit page definitions
+│       ├── 1_Welcome.py
+│       ├── 2_Agent Setup.py
+│       ├── 3_Instructions.py
+|       └── ...                              # add more pages
+│
+├── core/                                    # Planned orchestration + agent logic (empty)
+├── experiments/                             # Saved experiment configurations and results (empty)
+├── literature/                              # Reference papers on multi-agent systems and consensus (update this)
+│   └── ...
+│
+├── experiment_draft.json                    # Example experiment template saved from the app
+├── instructions.txt                         # Prompt template for advertisement annotation tasks
+├── output_schema.json                       # Sample schema for the output
+├── requirements.txt                         # Python dependencies for the platform
+└── README.md                                # this file
+```
+
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- **Python 3.11** with packages listed in `requirements.txt`
+- **OpenAI API access** (for GPT-4o)
+
+### Installation
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/Paularossi/ai-platform.git
+   cd ai-platform
+   ```
+
+2. **Set up a virtual environment (venv)**
+
+    Create the virtual environment with:
+    ```bash
+   python -m venv venv
+   ```
+
+   And then activate it with:
+   ```bash
+   venv\Scripts\activate.bat
+   ```
+
+3. **Install Python dependencies (change your CUDA version):**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Run the platform**
+   ```bash
+   streamlit run app/main.py
+   ```
+   A web page should open automatically.
+
+
+
+## 📊 System Design
 
 The platform is built around a modular architecture with clear separation of concerns:
 
