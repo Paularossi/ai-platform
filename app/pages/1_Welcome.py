@@ -2,6 +2,7 @@
 
 import streamlit as st
 import json
+from components.utils import output_fields_from_question_sets
 
 st.set_page_config(page_title="Multi-Agent Platform", page_icon="🧠", layout="wide")
 
@@ -13,26 +14,6 @@ def default_input_field():
 
 def default_output_field():
     return {"name": "", "type": "Single-label"}
-
-def output_fields_from_question_sets(question_sets):
-    fields = []
-    for q in question_sets:
-        field_type_map = {
-            "single_label": "Single-label",
-            "multi_label": "Multi-label",
-            "boolean": "Boolean",
-            "score": "Score",
-            "text": "Text",
-            "ranking": "Ranking",
-        }
-
-        fields.append(
-            {
-                "name": q.get("field_name", ""),
-                "type": field_type_map.get(q.get("field_type", "single_label"), "Single-label")
-            }
-        )
-    return fields
 
 
 def init_state():
@@ -131,17 +112,16 @@ init_state()
 
 # ---------- sidebar ----------
 st.sidebar.title("Experiment Builder")
-st.sidebar.caption("Step 1 of 6")
-st.sidebar.progress(1 / 6)
+st.sidebar.caption("Step 1 of 5")
+st.sidebar.progress(1 / 5)
 st.sidebar.markdown(
     """
 **Steps**
 1. Task
 2. Agents
-3. Schema
-4. Instructions
-5. Evaluation
-6. Review
+3. Instructions
+4. Dataset
+5. Review
 """
 )
 
@@ -226,38 +206,24 @@ with main_col:
         st.subheader("4. Output schema")
         st.caption("Define what the agents should return.")
 
-        # add option to upload a json file
-        uploaded_output_schema = st.file_uploader(
-            "Upload output schema JSON",
+        uploaded_questions = st.file_uploader(
+            "Upload question set JSON",
             type=["json"],
-            key="output_schema_uploader",
-            help="Upload a JSON file describing the output fields."
+            help="Upload structured label definitions and automatically update the output schema.",
+            key="question_set_uploader",
         )
 
-        if uploaded_output_schema is not None:
-            if st.button("Load output schema from file"):
+        if uploaded_questions is not None:
+            if st.button("Load questions from file"):
                 try:
-                    schema_data = json.load(uploaded_output_schema)
+                    data = json.load(uploaded_questions)
 
-                    if isinstance(schema_data, dict) and "output_fields" in schema_data:
-                        new_fields = schema_data["output_fields"]
-                    elif isinstance(schema_data, list):
-                        new_fields = schema_data
+                    if not isinstance(data, dict) or "questions" not in data or not isinstance(data["questions"], list):
+                        st.error("Invalid JSON format. Expected a top-level 'questions' list.")
                     else:
-                        st.error("Invalid JSON format. Use a list of fields or {'output_fields': [...]}.")
-
-                    if "new_fields" in locals():
-                        validated_fields = []
-                        for field in new_fields:
-                            validated_fields.append(
-                                {
-                                    "name": field.get("name", ""),
-                                    "type": field.get("type", "Single-label")
-                                }
-                            )
-
-                        st.session_state.output_fields = validated_fields
-                        st.success("Output schema loaded successfully.")
+                        st.session_state.question_sets = data["questions"]
+                        st.session_state.output_fields = output_fields_from_question_sets(data["questions"])
+                        st.success("Question sets loaded and output schema updated.")
 
                 except Exception as e:
                     st.error(f"Failed to load JSON: {e}")
@@ -295,62 +261,6 @@ with main_col:
             if st.button("Clear all output fields", type="secondary"):
                 st.session_state.output_fields = []
                 st.rerun()
-
-    with st.container(border=True):
-        st.subheader("5. Questions / prompt setup")
-        st.caption("Provide the questions that will be used as prompts for the task, as a JSON file.")
-        uploaded_questions = st.file_uploader(
-            "Upload question set JSON",
-            type=["json"],
-            help="Upload structured label definitions for each output field.",
-            key="question_set_uploader"
-        )
-        
-        if uploaded_questions is not None:
-            if st.button("Load questions from file"):
-                try:
-                    data = json.load(uploaded_questions)
-
-                    if "questions" not in data or not isinstance(data["questions"], list):
-                        st.error("Invalid JSON format. Expected a top-level 'questions' list.")
-                    else:
-                        st.session_state.question_sets = data["questions"]
-                        st.session_state.output_fields = output_fields_from_question_sets(data["questions"])
-                        st.success("Question sets loaded and output schema updated.")
-
-                except Exception as e:
-                    st.error(f"Failed to load JSON: {e}")
-
-
-    with st.container(border=True):
-        st.subheader("6. Instruction specification")
-        uploaded_instructions = st.file_uploader(
-            "Upload instructions as a text file",
-            type=["txt"],
-            key="instructions_uploader"
-        )
-        if uploaded_instructions is not None:
-            if st.button("Load instructions from file"):
-                try:
-                    instructions_text = uploaded_instructions.getvalue().decode("utf-8")
-                    st.session_state.base_instructions = instructions_text
-                    st.success("Instructions loaded successfully.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to load instructions: {e}")
-
-        base_instructions = st.text_area(
-            "Base task instructions",
-            placeholder="Write the main instructions all agents should follow.",
-            height=140,
-            key="base_instructions"
-        )
-
-        guideline_notes = st.text_area(
-            "Guidelines / protocol notes",
-            placeholder="Paste coding rules, rubric notes, or protocol constraints.",
-            height=120,
-        )
 
     st.info("Next: Configure agents and interaction protocol ->")
 

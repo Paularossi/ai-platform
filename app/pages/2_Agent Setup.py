@@ -16,7 +16,6 @@ def init_agent_config():
     if "protocol" not in st.session_state.experiment_config:
         st.session_state.experiment_config["protocol"] = {
             "setting": "Gossip (sequential)",
-            "platform_mode": "Multi-platform",
             "supervision_mode": "Unsupervised",
             "visibility_mode": "Current state only",
             "order_type": "Fixed",
@@ -31,7 +30,6 @@ def sync_agents_to_config():
 
     st.session_state.experiment_config["protocol"] = {
         "setting": st.session_state.interaction_setting,
-        "platform_mode": st.session_state.platform_mode,
         "supervision_mode": st.session_state.supervision_mode,
         "visibility_mode": st.session_state.visibility_mode,
         "order_type": st.session_state.order_type,
@@ -77,9 +75,6 @@ def init_agent_state():
     if "interaction_setting" not in st.session_state:
         st.session_state.interaction_setting = protocol.get("setting", "Gossip (sequential)")
 
-    if "platform_mode" not in st.session_state:
-        st.session_state.platform_mode = protocol.get("platform_mode", "Multi-platform")
-
     if "supervision_mode" not in st.session_state:
         st.session_state.supervision_mode = protocol.get("supervision_mode", "Unsupervised")
 
@@ -124,17 +119,16 @@ init_agent_state()
 
 # ---------- sidebar ----------
 st.sidebar.title("Experiment Builder")
-st.sidebar.caption("Step 2 of 6")
-st.sidebar.progress(2 / 6)
+st.sidebar.caption("Step 2 of 5")
+st.sidebar.progress(2 / 5)
 st.sidebar.markdown(
     """
 **Steps**
 1. Task
 2. Agents
-3. Schema
-4. Instructions
-5. Evaluation
-6. Review
+3. Instructions
+4. Dataset
+5. Review
 """
 )
 
@@ -148,7 +142,7 @@ with main_col:
     with st.container(border=True):
         st.subheader("1. Protocol configuration")
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         with c1:
             st.session_state.interaction_setting = st.selectbox(
                 "Interaction setting",
@@ -158,12 +152,6 @@ with main_col:
                 ),
             )
         with c2:
-            st.session_state.platform_mode = st.selectbox(
-                "Platform mode",
-                ["Mono-platform", "Multi-platform"],
-                index=["Mono-platform", "Multi-platform"].index(st.session_state.platform_mode),
-            )
-        with c3:
             st.session_state.supervision_mode = st.selectbox(
                 "Supervision mode",
                 ["Unsupervised", "Supervised"],
