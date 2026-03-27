@@ -310,7 +310,6 @@ with summary_col:
     with st.container(border=True):
         st.subheader("Live summary")
         st.markdown(f"**Setting**  \n{st.session_state.interaction_setting}")
-        st.markdown(f"**Platform mode**  \n{st.session_state.platform_mode}")
         st.markdown(f"**Supervision**  \n{st.session_state.supervision_mode}")
         st.markdown(f"**Visibility**  \n{st.session_state.visibility_mode}")
         st.markdown(f"**Order**  \n{st.session_state.order_type}")
@@ -327,7 +326,7 @@ with summary_col:
         st.markdown("**Agents**")
         for agent in st.session_state.agents:
             st.markdown(
-                f"- **{agent['name']}** — {agent['provider']} / {agent['model']} / {agent['role']}"
+                f"- **{agent['name']}** - {agent['provider']} / {agent['model']} / {agent['role']}"
             )
 
     with st.container(border=True):

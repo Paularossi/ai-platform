@@ -264,30 +264,28 @@ with main_col:
 
     st.info("Next: Configure agents and interaction protocol ->")
 
-    nav1, nav2, nav3 = st.columns([2, 2, 5]) # the numbers represent the relative width of the columns, so nav3 is wider to push the buttons to the left
+    nav1, nav2, nav3 = st.columns([2, 2, 5])
     with nav1:
         if st.button("Save draft"):
             sync_welcome_to_config()
-            with open("experiment_draft.json", "w", encoding="utf-8") as f:
-                json.dump(st.session_state.experiment_config, f, indent=2, ensure_ascii=False)
-            st.success("Draft saved.")
+            st.switch_page("pages/5_Review.py")
     with nav2:
         if st.button("Next ->"):
-            sync_welcome_to_config()  # make sure to save all the info in the session state before moving to the next page
+            sync_welcome_to_config()
             st.switch_page("pages/2_Agent Setup.py")
 
 with summary_col:
     with st.container(border=True):
         st.subheader("Live summary")
-        st.markdown(f"**Name**  \n{exp_name or '—'}")
+        st.markdown(f"**Name**  \n{exp_name or '-'}")
         st.markdown(f"**Task category**  \n{task_category}")
-        st.markdown(f"**Modality**  \n{', '.join(modalities) if modalities else '—'}")
-        st.markdown(f"**Author**  \n{author or '—'}")
-        st.markdown(f"**Protocol**  \n{protocol_id or '—'}")
+        st.markdown(f"**Modality**  \n{', '.join(modalities) if modalities else '-'}")
+        st.markdown(f"**Author**  \n{author or '-'}")
+        st.markdown(f"**Protocol**  \n{protocol_id or '-'}")
 
         st.divider()
         st.markdown("**Task description**")
-        st.write(task_description or "—")
+        st.write(task_description or "-")
 
         st.divider()
         st.markdown("**Input fields**")
@@ -299,5 +297,3 @@ with summary_col:
 
         for field in current_output_fields:
             st.markdown(f"- `{field['name'] or 'unnamed'}` ({field['type']})")
-
-# everything works, next step to save all this info in the session state and make it available in the next pages, and ideally also save it as a draft to a file so we can retrieve it later when we want to run the experiment

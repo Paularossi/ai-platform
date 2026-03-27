@@ -1,0 +1,23 @@
+{
+  "questions": [
+    {
+      "field_name": "target_age",
+      "field_type": "single_label",
+      "instruction": "Determine the primary target audience of the advertisement.",
+      "options": [
+        {"code": "CHILD_TARGETED", "description": "Targeted at children up to 15 years old."},
+        {"code": "ADOLESCENT_TARGETED", "description": "Targeted at adolescents aged 16-18."},
+        {"code": "ADULT_TARGETED", "description": "Targeted at adults without specific focus on children or adolescents."}
+      ]
+    },
+    {
+      "field_name": "alcohol",
+      "field_type": "single_label",
+      "instruction": "Determine whether alcohol is present in the advertisement. Answer yes only if there is a clear alcoholic drink, or if it's a brand known for alcoholic products.",
+      "options": [
+        {"code": "YES", "description": "Presence of alcoholic drinks or alcohol brands."},
+        {"code": "NO", "description": "No alcoholic drinks or alcohol brands present."}
+      ]
+    }
+  ]
+}
