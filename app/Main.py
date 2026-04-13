@@ -25,7 +25,8 @@ def clear_experiment_state():
         "stopping_rule", "initializer_agent", "judge_agent",
         "exp_name", "author", "protocol_id", "task_category", "modalities",
         "task_description", "dataset_df", "dataset_filename", "dataset_image_bytes",
-        "dataset_all_image_names", "column_mapping", "dataset_ready",
+        "dataset_all_image_names", "dataset_image_dir", "dataset_image_lookup",
+        "column_mapping", "dataset_ready",
     ]
     for key in keys_to_clear:
         st.session_state.pop(key, None)

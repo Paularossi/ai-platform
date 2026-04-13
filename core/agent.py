@@ -13,13 +13,70 @@ via the ContextPacket.
 
 from __future__ import annotations
 
+import base64
 import re
 from typing import Any
+from pathlib import Path
 
 from core.hub import ContextPacket
 from core.state import AgentOutput
 
 
+# ---------------------------------------------------------------------------
+# Image helpers
+# ---------------------------------------------------------------------------
+
+_MIME_MAP = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "png": "image/png", "webp": "image/webp", "gif": "image/gif",
+}
+
+_IMAGE_KEYS = ("image_path", "image_url", "image")
+
+
+def _image_path_to_data_url(image_path: str) -> str | None:
+    """Load an image from disk and return a base64 data URL, or None on failure."""
+    try:
+        ext = Path(image_path).suffix.lower().lstrip(".")
+        mime = _MIME_MAP.get(ext, "image/png")
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
+
+
+def _resolve_image_url(item_data: dict[str, Any]) -> str | None:
+    """
+    Resolve image input from item data into a URL consumable by OpenAI image_url.
+
+    Accepted sources:
+    - local path in image_path / image
+    - remote URL in image_url / image
+    - data URL in image_url / image
+    """
+    for key in _IMAGE_KEYS:
+        raw_val = item_data.get(key)
+        if not raw_val:
+            continue
+
+        val = str(raw_val).strip()
+        if not val:
+            continue
+
+        lowered = val.lower()
+        if lowered.startswith(("http://", "https://", "data:image/")):
+            return val
+
+        # If this looks like a local file path, try encoding to a data URL (supports both explicit image_path and cases where "image" contains a path).
+        if Path(val).exists():
+            data_url = _image_path_to_data_url(val)
+            if data_url:
+                return data_url
+
+    return None
+    
+    
 # ---------------------------------------------------------------------------
 # Prompt builders
 # ---------------------------------------------------------------------------
@@ -203,6 +260,25 @@ def _parse_output(
         stripped = line.strip()
         if not stripped:
             continue
+        
+        # try two different header formats
+        # FIELD_NAME: target_age
+        field_name_match = re.match(r"^field_name\s*:\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*$", stripped, re.IGNORECASE)
+        if field_name_match:
+            fname = field_name_match.group(1).strip()
+            if fname in field_types:
+                current_field = fname
+                in_pros, in_cons = False, False
+                continue
+
+        # Q1. [target_age]
+        q_header_match = re.match(r"^q\d+\.?\s*\[\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\]\s*$", stripped, re.IGNORECASE)
+        if q_header_match:
+            fname = q_header_match.group(1).strip()
+            if fname in field_types:
+                current_field = fname
+                in_pros, in_cons = False, False
+                continue
 
         # Detect pros/cons section headers
         if stripped.lower().startswith("pros:") or stripped.lower() == "pros":
@@ -220,6 +296,14 @@ def _parse_output(
             cons.append(stripped[1:].strip())
             continue
 
+        # if there are no bullet markers for the pros/cons lines.
+        if in_pros:
+            pros.append(stripped)
+            continue
+        if in_cons:
+            cons.append(stripped)
+            continue
+
         # Detect a field block header: "field_name:" at the start of a line
         header_match = re.match(r"^\*?([a-zA-Z_][a-zA-Z0-9_]*)\*?\s*:(.*)$", stripped)
         if header_match:
@@ -232,24 +316,25 @@ def _parse_output(
 
                 # Could be block header (rest is empty) or inline legacy format
                 if rest:
-                    # Legacy inline: field_name: CODE | reasoning  OR  field_name: CODE - reasoning
+                    # field_name: CODE | reasoning  OR  field_name: CODE - reasoning
                     value_str = re.split(r"\s*[|\-]\s*", rest)[0].strip()
                     _store_label(fname, value_str, field_types, labels)
                 continue
 
-            # Sub-keys inside a field block
-            if current_field and fname == "verdict":
+            # Sub-keys inside a field block (case-insensitive)
+            fname_l = fname.lower()
+            if current_field and fname_l == "verdict":
                 value_str = rest.strip()
                 _store_label(current_field, value_str, field_types, labels)
                 continue
 
-            if current_field and fname == "probabilities":
+            if current_field and fname_l == "probabilities":
                 probs = _parse_probabilities(rest)
                 if probs:
                     probabilities[current_field] = probs
                 continue
 
-            if current_field and fname == "confidence":
+            if current_field and fname_l == "confidence":
                 try:
                     conf_val = float(rest.strip())
                     if conf_val > 1.0:
@@ -260,9 +345,9 @@ def _parse_output(
                 continue
 
         # Indented sub-keys (with leading spaces)
-        indent_match = re.match(r"^\s+(verdict|probabilities|confidence)\s*:\s*(.+)$", line)
+        indent_match = re.match(r"^\s+(verdict|probabilities|confidence)\s*:\s*(.+)$", line, re.IGNORECASE)
         if indent_match and current_field:
-            key = indent_match.group(1)
+            key = indent_match.group(1).lower()
             val = indent_match.group(2).strip()
             if key == "verdict":
                 _store_label(current_field, val, field_types, labels)
@@ -401,11 +486,36 @@ class Agent:
             from openai import OpenAI  # lazy import - not required at module level
 
             client = OpenAI()  # reads OPENAI_API_KEY from environment
+            
+            # Build user content - multimodal whenever image data can be resolved.
+            image_url = _resolve_image_url(packet.item_data)
+            if image_url:
+                user_content: Any = [
+                    {"type": "text", "text": user_message},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ]
+            else:
+                # Keep text-only fallback, but retain explicit image refs if provided
+                # so the model still receives image context when attachment fails.
+                fallback_refs = [
+                    str(packet.item_data.get(k)).strip()
+                    for k in _IMAGE_KEYS
+                    if packet.item_data.get(k)
+                ]
+                if fallback_refs:
+                    user_content = (
+                        user_message
+                        + "\n\n[Image reference provided but could not be attached as vision input]: "
+                        + ", ".join(fallback_refs)
+                    )
+                else:
+                    user_content = user_message
+
             response = client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
+                    {"role": "user", "content": user_content},
                 ],
                 temperature=0.0,
                 max_tokens=1500,  # increased to fit full probability distributions

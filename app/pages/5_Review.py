@@ -145,7 +145,7 @@ with main_col:
     with st.container(border=True):
         st.subheader("1. Overview")
         ov = draft["overview"]
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3 = st.columns([3, 3, 2])
         c1.metric("Experiment name", val(ov.get("name")))
         c2.metric("Author", val(ov.get("author")))
         c3.metric("Protocol version", val(ov.get("protocol_id")))
@@ -179,9 +179,9 @@ with main_col:
         st.subheader("3. Protocol & agents")
         proto = draft["protocol"]
 
-        c1, c2, c3 = st.columns(3)
+        c1, _, c3 = st.columns(3)
         c1.markdown(f"**Setting**  \n{val(proto.get('setting'))}")
-        c2.markdown(f"**Platform mode**  \n{val(proto.get('platform_mode'))}")
+        #c2.markdown(f"**Platform mode**  \n{val(proto.get('platform_mode'))}")
         c3.markdown(f"**Supervision**  \n{val(proto.get('supervision_mode'))}")
 
         c1, c2, c3 = st.columns(3)
@@ -252,7 +252,7 @@ with main_col:
         if not ds.get("filename"):
             st.markdown("_No dataset uploaded._")
         else:
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3 = st.columns([5, 2, 2])
             c1.metric("File", ds.get("filename", "-"))
             if ds.get("num_images"):
                 c2.metric("Images", ds["num_images"])

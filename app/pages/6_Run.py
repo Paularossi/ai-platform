@@ -12,6 +12,7 @@ import base64
 import io
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -74,6 +75,13 @@ def load_image_b64(image_path: str) -> str | None:
         return None
 
 
+def _normalize_image_key(raw: Any) -> str:
+    """Normalize an item/image identifier for tolerant filename matching."""
+    s = str(raw).strip()
+    s = re.sub(r"\.0+$", "", s)
+    return s.lower()
+
+
 def resolve_image_path(
     item_id: str,
     dataset_cfg: dict,
@@ -88,15 +96,31 @@ def resolve_image_path(
     if not image_dir:
         return None
 
-    # Try exact match first, then strip _img suffix
+    # First try direct lookup built during ZIP extraction.
+    lookup: dict[str, str] = st.session_state.get("dataset_image_lookup", {}) or {}
     stems_to_try = [item_id, item_id.replace("_img", "")]
-    extensions = [".png", ".jpg", ".jpeg", ".webp"]
-
     for stem in stems_to_try:
-        for ext in extensions:
-            path = os.path.join(image_dir, stem + ext)
-            if os.path.exists(path):
-                return path
+        norm = _normalize_image_key(stem)
+        if norm in lookup and os.path.exists(lookup[norm]):
+            return lookup[norm]
+
+    # Fallback scan of the image directory (handles mixed-case extensions).
+    try:
+        by_stem: dict[str, str] = {}
+        for name in os.listdir(image_dir):
+            full = os.path.join(image_dir, name)
+            if not os.path.isfile(full):
+                continue
+            stem = os.path.splitext(name)[0]
+            by_stem[_normalize_image_key(stem)] = full
+
+        for stem in stems_to_try:
+            norm = _normalize_image_key(stem)
+            if norm in by_stem:
+                return by_stem[norm]
+    except Exception:
+        return None
+
     return None
 
 
@@ -189,7 +213,7 @@ if missing:
 with st.container(border=True):
     st.subheader("Run configuration")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3 = st.columns([2, 2, 3])
 
     with col1:
         n_items = st.number_input(
@@ -219,7 +243,7 @@ with st.container(border=True):
         )
 
     proto = cfg.get("protocol", {})
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns([5, 2, 2, 3])
     c1.metric("Setting", proto.get("setting", "-"))
     c2.metric("Agents", len(agents_cfg))
     c3.metric("Max cycles", proto.get("max_cycles", "-"))
@@ -274,6 +298,9 @@ if not launch:
         _show_results(st.session_state["run_results"], cfg)
     st.stop()
 
+# Clear any previous results so a fresh run always starts clean
+st.session_state.pop("run_results", None)
+
 # ── Set API key if provided ───────────────────────────────────────────────────
 if not dry_run and api_key_input:
     os.environ["OPENAI_API_KEY"] = api_key_input
@@ -290,6 +317,36 @@ with st.expander("🔍 Pre-run diagnostics (expand if labels are empty)", expand
     st.markdown(f"**Agents:** {[a.name for a in agents]}")
     st.markdown(f"**Visibility mode:** {visibility_mode}")
     st.markdown(f"**Column mapping:** {st.session_state.get('column_mapping', {})}")
+ 
+    # ── Image diagnostics ─────────────────────────────────────────────────
+    st.divider()
+    st.markdown("**Image resolution diagnostics**")
+    img_dir = st.session_state.get("dataset_image_dir")
+    if not img_dir:
+        st.error("`dataset_image_dir` is not set — images will not be loaded. "
+                 "Go back to Step 4 and re-upload your ZIP file.")
+    else:
+        st.success(f"Image temp dir: `{img_dir}`")
+        try:
+            files_on_disk = os.listdir(img_dir)
+            st.markdown(f"Files in temp dir ({len(files_on_disk)} total), first 10:")
+            st.code("\n".join(files_on_disk[:10]))
+        except Exception as e:
+            st.error(f"Cannot list temp dir: {e}")
+ 
+        # Show how the first 3 rows of the dataset would resolve
+        diag_subset = df.head(3)
+        st.markdown("**Sample item_id → image path resolution (first 3 rows):**")
+        for _, diag_row in diag_subset.iterrows():
+            diag_id = str(diag_row.get(
+                column_mapping.get("image", column_mapping.get("id", df.columns[0])),
+                "?"
+            ))
+            diag_path = resolve_image_path(diag_id, dataset_cfg, None)
+            if diag_path:
+                st.markdown(f"- `{diag_id}` → ✅ `{diag_path}`")
+            else:
+                st.markdown(f"- `{diag_id}` → ❌ not found")
     if cfg.get("questions"):
         st.markdown("**Question field names:** " + ", ".join(
             f"`{q['field_name']}`" for q in cfg["questions"]
@@ -345,6 +402,13 @@ for item_idx, row in subset.iterrows():
     # ── Live turn feed for this item ──────────────────────────────────────
     with st.expander(f"📄 Item {item_idx + 1} / {len(subset)}  -  `{item_id}`", expanded=True):
 
+        if item_data.get("image_path"):
+            st.caption(f"Image attached for this item: {item_data['image_path']}")
+        else:
+            st.warning(
+                "No image attached for this item. The run will be text-only unless image resolution succeeds."
+            )
+
         feed = st.empty()
         entries: list[str] = []   # accumulated markdown lines rendered all at once
 
@@ -369,9 +433,12 @@ for item_idx, row in subset.iterrows():
                     lines.append(f"**Visible history** ({len(packet.visible_history)} entry/entries):")
                     for h in packet.visible_history:
                         h_labels = "  ,  ".join(f"`{k}`: {v}" for k, v in h.labels.items())
+                        pros_note = ""
+                        real_pros = [p for p in h.pros if p != "[dry-run placeholder]"]
+                        if real_pros:
+                            pros_note = f"  \n  *{real_pros[0]}*"
                         lines.append(
-                            f"- Cycle {h.cycle + 1} · **{h.agent_name}**: {h_labels}"
-                            + (f"  \n  *{h.reasoning}*" if h.reasoning and h.reasoning != "[dry-run placeholder]" else "")
+                            f"- Cycle {h.cycle + 1} · **{h.agent_name}**: {h_labels}{pros_note}"
                         )
                 else:
                     lines.append(f"**Visible history:** *(none - visibility mode: {visibility_mode})*")
@@ -477,9 +544,5 @@ _show_results(all_results, cfg)
 
 
 # ==================
-# bugs to fix:
-# - if i rerun this page it still keeps the results
-# - i still get the `use_container_width` will be removed after 2025-12-31.` warning in 4.dataset when mapping the columns
-# - change the metadata showing to only 5 rows by default
-# - adjust the column widths for some text fields in the Review and Run pages
-# - apparently the image is not provided in the prompt ?????????? wtf i just realised
+# TODO: bugs to fix:
+# i still get the `use_container_width` will be removed after 2025-12-31.` warning in 4.dataset when mapping the columns

@@ -1,42 +1,57 @@
-# 🧠 Multi-Agent Lab 
-A configurable platform for studying multi-agent AI interaction, consensus formation, and bias in structured tasks.
+# Multi-Agent Lab
+
+A configurable Streamlit platform for running structured, multi-agent annotation and review workflows with LLMs.
 
 ## Overview
 
-This project develops a platform for studying multi-agent interaction among large language models (LLMs) in structured task environments. The central objective is to investigate whether iterative communication between multiple AI agents operating under predefined interaction protocols can improve task performance, consistency, and alignment compared to zero-shot model outputs.
+Multi-Agent Lab lets you define:
 
-Rather than treating model predictions as static, the platform models annotation and decision-making as a dynamic, multi-step process, where agents sequentially or collectively review and revise a shared structured state. This enables systematic analysis of convergence behavior, disagreement patterns, and sources of bias across agents and model providers.
+- task setup and modality
+- input and output schemas
+- agent roster and interaction protocol
+- instructions and per-agent prompt overrides
+- dataset mappings
 
-While the initial application focuses on multimodal advertisement annotation (image and text), the system is designed to be task-agnostic, supporting a wide range of classification, evaluation, and revision tasks through configurable schemas and instruction sets.
+The run loop executes iterative agent turns (gossip-style), tracks history and label changes, and exports run outputs for analysis.
 
+## Current Architecture
 
-## 📁 Repository Structure
+- app: Streamlit UI and experiment workflow pages
+- core: runtime logic (agent, hub, protocol, state)
+- experiments: output artifacts and saved runs
+- literature: research references
+
+## Repository Structure
 
 ```
 ai-platform/
-├── app/                                     # Streamlit UI for configuring and running experiments
-│   ├── Main.py                              # App entry point
-│   ├── components/                          # Placeholder for shared UI components (currently empty)
-│   └── pages/                               # Individual Streamlit page definitions
+├── app/
+│   ├── Main.py
+│   ├── components/
+│   └── pages/
 │       ├── 1_Welcome.py
 │       ├── 2_Agent Setup.py
 │       ├── 3_Instructions.py
-|       └── ...                              # add more pages
-│
-├── core/                                    # Planned orchestration + agent logic (empty)
-├── experiments/                             # Saved experiment configurations and results (empty)
-├── literature/                              # Reference papers on multi-agent systems and consensus (update this)
-│   └── ...
-│
-├── experiment_draft.json                    # Example experiment template saved from the app
-├── instructions.txt                         # Prompt template for advertisement annotation tasks
-├── output_schema.json                       # Sample schema for the output
-├── requirements.txt                         # Python dependencies for the platform
-└── README.md                                # this file
+│       ├── 4_Dataset.py
+│       ├── 5_Review.py
+│       └── 6_Run.py
+├── core/
+│   ├── agent.py
+│   ├── hub.py
+│   ├── state.py
+│   └── protocols/
+│       └── gossip.py
+├── experiments/
+├── literature/
+├── experiment_draft.json
+├── instructions.txt
+├── output_schema.json
+├── output_schema_small.json
+├── requirements.txt
+└── README.md
 ```
 
-
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -53,8 +68,8 @@ ai-platform/
 
 2. **Set up a virtual environment (venv)**
 
-    Create the virtual environment with:
-    ```bash
+   Create the virtual environment with:
+   ```bash
    python -m venv venv
    ```
 
@@ -68,47 +83,61 @@ ai-platform/
    pip install -r requirements.txt
    ```
 
-4. **Run the platform**
+4. Run app
+
    ```bash
-   streamlit run app/main.py
+   streamlit run app/Main.py
    ```
-   A web page should open automatically.
+
+## Dataset and Modality Behavior
+
+### Text-only modality
+
+- Dataset flow is text-only.
+- Prompt user content contains mapped non-image fields.
+
+### Image plus text modality
+
+- ZIP upload can include images and spreadsheet metadata.
+- Images are extracted to a temporary directory at load time.
+- Column mapping determines which dataset column corresponds to each input field.
+- Image matching uses normalized keys for robust resolution from metadata IDs to image files.
+
+## Prompt Construction
+
+At run time:
+
+- all mapped non-image input fields are added to the user text block
+- image content is attached separately as multimodal image input
+- if no image can be resolved, run continues in text-only mode for that item
+
+Practical implication:
+
+- for fields like caption and brand, map columns and they appear in prompt text
+- for image fields, map the image ID column so the file can be resolved and attached
+
+## Output Parsing
+
+The parser supports common structured variants, including:
+
+- FIELD_NAME style blocks
+- Q1 [field_name] style blocks
+- verdict, probabilities, confidence keys
+- pros and cons with or without bullet markers
+
+## Troubleshooting
+
+### Raw response parse failed
+
+- model output can drift from expected structure
+- parser accepts multiple formats, but edge cases can still occur
+- inspect raw block shown in UI and refine instructions if needed
 
 
+## Roadmap
 
-## 📊 System Design
-
-The platform is built around a modular architecture with clear separation of concerns:
-
-- **Frontend (Streamlit)** - A user interface for defining experiments, configuring tasks, and visualizing agent interactions.
-
-- **Orchestration Layer** - Protocol-driven execution of multi-agent workflows, including sequential (gossip), parallel (crowd), and structured interaction settings (duel, court).
-
-- **Agent Layer** - Role-based agents (e.g., initializer, skeptical reviewer, conservative validator) that iteratively modify or validate a shared output.
-
-- **Provider Layer** - Pluggable LLM backends (initially OpenAI, with planned support for additional providers).
-
-- **State Management** - A shared, structured state object that evolves over time, accompanied by a full revision history for each interaction step.
-
-- **Logging and Reproducibility** - Configuration-driven experiments with stored metadata, intermediate outputs, and complete execution traces to enable reproducible analysis.
-
-
-## 🗺️ Roadmap
-
-- ✅ Initial project structure
-- ✅ Streamlit app setup 
-- ✅ Experiment setup UI (task + schema + instructions)
-- ✅ High-level architecture defined
-- ✅ Agent and protocol configuration interface
-- ⬜ Formal definition of experiment configuration and shared state schemas
-- ⬜ Implementation of core orchestration logic (sequential gossip protocol)
-- ⬜ Additional interaction protocols (crowd, duel, court)
-- ⬜ Multi-provider integration (e.g., Anthropic, Gemini, local models)
-- ⬜ Evaluation metrics (consensus, flexibility, bias measures)
-- ⬜ Analysis and visualization dashboard
-- ⬜ Optional backend and database support for scalability
-
-
-## Objective
-
-The long-term goal is to develop a research-oriented framework for multi-agent AI systems, enabling systematic experimentation with interaction protocols, reproducible evaluation of model behavior, and deeper understanding of how collective AI processes influence decision quality and bias.
+- broader protocol set (crowd, duel, court)
+- additional model providers
+- richer evaluation and analytics dashboards
+- improved experiment tracking and reproducibility metadata
+- broad use cases (not just ad annotations)

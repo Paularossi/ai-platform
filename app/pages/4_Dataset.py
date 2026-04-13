@@ -2,6 +2,8 @@
 
 import io
 import os
+import re
+import tempfile
 import zipfile
 
 import pandas as pd
@@ -29,7 +31,7 @@ st.caption("Upload your dataset. The upload format adapts to the modalities you 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 SHEET_EXTENSIONS = {".csv", ".xlsx"}
-N_SAMPLE_IMAGES = 3  # max images to render in preview - keeps the page fast
+N_SAMPLE_IMAGES = 3  # max images to render in preview
 
 
 # ---------- state ----------
@@ -39,6 +41,8 @@ def init_dataset_state():
         "dataset_filename": None,
         "dataset_image_bytes": {},   # {filename_stem: bytes} - only sample images stored
         "dataset_all_image_names": [],  # full list of image filenames found in ZIP
+        "dataset_image_dir": None,
+        "dataset_image_lookup": {},
         "column_mapping": {},
         "dataset_ready": False,
     }
@@ -77,13 +81,18 @@ def load_spreadsheet_bytes(raw: bytes, filename: str) -> pd.DataFrame:
 def extract_zip(raw_bytes: bytes) -> tuple:
     """
     Extract a ZIP file.
-    Returns (df, sample_images, all_image_names, error_string_or_None)
+    Writes all images to a temp directory so they can be read at run time.
+    Returns (df, sample_images, all_image_names, image_dir, image_lookup, error_string_or_None)
     """
     df = None
     sample_images: dict[str, bytes] = {}
     all_image_names: list[str] = []
+    image_dir: str | None = None
+    image_lookup: dict[str, str] = {}
 
     try:
+        tmp_dir = tempfile.mkdtemp(prefix="ai_platform_imgs_")
+
         with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
             names = zf.namelist()
 
@@ -108,24 +117,39 @@ def extract_zip(raw_bytes: bytes) -> tuple:
             ]
             all_image_names = [os.path.basename(n) for n in image_files]
 
-            # Load only first N_SAMPLE_IMAGES for the preview
-            for img_path in image_files[:N_SAMPLE_IMAGES]:
-                stem = os.path.splitext(os.path.basename(img_path))[0]
-                sample_images[stem] = zf.read(img_path)
+            # Write all images to temp dir; keep sample bytes for preview
+            for img_path in image_files:
+                img_bytes = zf.read(img_path)
+                basename = os.path.basename(img_path)
+                stem = os.path.splitext(basename)[0]
+                full_path = os.path.join(tmp_dir, basename)
+ 
+                with open(full_path, "wb") as f:
+                    f.write(img_bytes)
+ 
+                norm = re.sub(r"\.0+$", "", stem.strip().lower())
+                image_lookup[norm] = full_path
 
+                if len(sample_images) < N_SAMPLE_IMAGES:
+                    sample_images[stem] = img_bytes
+ 
+        image_dir = tmp_dir
+ 
     except zipfile.BadZipFile:
-        return None, {}, [], "The uploaded file is not a valid ZIP archive."
+        return None, {}, [], None, {}, "The uploaded file is not a valid ZIP archive."
     except Exception as e:
-        return None, {}, [], str(e)
+        return None, {}, [], None, {}, str(e)
+ 
+    return df, sample_images, all_image_names, image_dir, image_lookup, None
 
-    return df, sample_images, all_image_names, None
 
-
-def persist_dataset(df, sample_images, all_image_names, filename):
+def persist_dataset(df, sample_images, all_image_names, image_dir, image_lookup, filename):
     st.session_state.dataset_df = df
     st.session_state.dataset_filename = filename
     st.session_state.dataset_image_bytes = sample_images
     st.session_state.dataset_all_image_names = all_image_names
+    st.session_state.dataset_image_dir = image_dir  # None for text-only datasets
+    st.session_state.dataset_image_lookup = image_lookup or {}
     st.session_state.dataset_ready = True
 
     cfg = st.session_state.setdefault("experiment_config", {})
@@ -189,11 +213,11 @@ with main_col:
 
                 with st.spinner("Reading dataset…"):
                     if fname.endswith(".zip"):
-                        df, sample_imgs, all_imgs, err = extract_zip(raw)
+                        df, sample_imgs, all_imgs, image_dir, image_lookup, err = extract_zip(raw)
                         if err:
                             st.error(f"Failed to load ZIP: {err}")
                         else:
-                            persist_dataset(df, sample_imgs, all_imgs, fname)
+                            persist_dataset(df, sample_imgs, all_imgs, image_dir, image_lookup, fname)
                             n_imgs = len(all_imgs)
                             n_rows = len(df) if df is not None else 0
                             msg = f"Loaded {n_imgs} image(s)"
@@ -204,7 +228,7 @@ with main_col:
                     else:
                         try:
                             df = load_spreadsheet_bytes(raw, fname)
-                            persist_dataset(df, {}, [], fname)
+                            persist_dataset(df, {}, [], None, {}, fname)
                             st.success(f"Loaded {len(df)} rows × {len(df.columns)} columns.")
                             st.rerun()
                         except Exception as e:
@@ -229,7 +253,7 @@ with main_col:
                 img_cols = st.columns(len(sample_imgs))
                 for col, (stem, img_bytes) in zip(img_cols, sample_imgs.items()):
                     with col:
-                        st.image(img_bytes, caption=stem, use_container_width=True)
+                        st.image(img_bytes, caption=stem, width="stretch")
 
         # Metadata table
         if df is not None:
