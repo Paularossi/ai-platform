@@ -8,8 +8,6 @@ and finally lets you download the full results as CSV + JSON.
 
 from __future__ import annotations
 
-import base64
-import io
 import json
 import os
 import re
@@ -29,8 +27,9 @@ if str(ROOT) not in sys.path:
 
 from core.agent import Agent
 from core.hub import CommunicationHub
-from core.protocols.gossip import GossipProtocol, RunEvent
-from core.state import ExperimentState, AgentOutput
+from core.protocols import RunEvent
+from core.protocols.gossip import GossipProtocol
+from core.state import AgentOutput
 
 st.set_page_config(page_title="Run Experiment", page_icon="🚀", layout="wide")
 
@@ -61,18 +60,22 @@ def build_agents(cfg: dict) -> list[Agent]:
     return [Agent(a, cfg) for a in cfg.get("agents", [])]
 
 
-def load_image_b64(image_path: str) -> str | None:
-    """Load an image from disk and return as base64 string for the OpenAI API."""
-    try:
-        with open(image_path, "rb") as f:
-            data = f.read()
-        ext = Path(image_path).suffix.lower().lstrip(".")
-        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
-                "png": "image/png", "webp": "image/webp",
-                "gif": "image/gif"}.get(ext, "image/png")
-        return f"data:{mime};base64,{base64.b64encode(data).decode()}"
-    except Exception:
-        return None
+def build_protocol(agents: list[Agent], cfg: dict, dry_run: bool):
+    """Return the correct protocol instance based on the configured setting."""
+    setting = cfg.get("protocol", {}).get("setting", "Gossip (sequential)")
+    if setting == "Gossip (sequential)":
+        return GossipProtocol(agents, cfg, dry_run=dry_run)
+    elif setting == "Crowd (parallel)":
+        from core.protocols.crowd import CrowdProtocol
+        return CrowdProtocol(agents, cfg, dry_run=dry_run)
+    # Future protocols slot in here:
+    # elif setting == "Duel (debate)":
+    #     from core.protocols.duel import DuelProtocol
+    #     return DuelProtocol(agents, cfg, dry_run=dry_run)
+    # elif setting == "Court (judge-based)":
+    #     from core.protocols.court import CourtProtocol
+    #     return CourtProtocol(agents, cfg, dry_run=dry_run)
+    raise ValueError(f"Unknown protocol setting: '{setting}'")
 
 
 def _normalize_image_key(raw: Any) -> str:
@@ -140,20 +143,6 @@ def build_item_data(row: pd.Series, column_mapping: dict, image_path: str | None
         data["image_path"] = image_path
 
     return data
-
-
-def hub_to_experiment_state(hub: CommunicationHub) -> ExperimentState:
-    """Convert a finished hub into an ExperimentState for serialisation."""
-    state = ExperimentState(
-        item_id=hub.item_id,
-        item_data=hub.item_data,
-        current_labels=hub.current_labels,
-        history=hub.log,
-        converged=hub.converged,
-        originator_name=hub.originator_name,
-        originator_labels=hub.originator_labels,
-    )
-    return state
 
 
 def results_to_df(results: list[dict]) -> pd.DataFrame:
@@ -307,7 +296,7 @@ if not dry_run and api_key_input:
 
 # ── Build agents and protocol ─────────────────────────────────────────────────
 agents = build_agents(cfg)
-protocol = GossipProtocol(agents, cfg, dry_run=dry_run)
+protocol = build_protocol(agents, cfg, dry_run=dry_run)
 agent_names = [a.name for a in agents]
 visibility_mode = proto.get("visibility_mode", "Current state only")
 
@@ -414,9 +403,43 @@ for item_idx, row in subset.iterrows():
 
         t_start = time.time()
 
+        is_crowd = cfg.get("protocol", {}).get("setting", "") == "Crowd (parallel)"
+        # In Crowd mode we render one compact "context" block at the START of each
+        # new cycle (before any submissions) instead of a per-agent dispatch block.
+        _last_crowd_cycle_rendered = -1
+
         for event in protocol.run_iter(hub):
 
             if event.kind == "dispatch":
+                if is_crowd:
+                    # Render a context block only when starting a NEW round after a
+                    # failed convergence check (cycle > 0).  Round 1 (cycle 0) is
+                    # always silent — no convergence decision has been made yet.
+                    if event.cycle > 0 and event.cycle != _last_crowd_cycle_rendered:
+                        _last_crowd_cycle_rendered = event.cycle
+                        packet = event.packet
+                        agent_list = [a.name for a in agents]
+                        dlines = [
+                            f"#### 📬 Round {event.cycle + 1} · Context sent to all agents",
+                            f"**Agents:** {', '.join(agent_list)}",
+                        ]
+                        if packet.current_labels:
+                            lstr = "  ,  ".join(
+                                f"`{k}`: {v}" for k, v in packet.current_labels.items()
+                            )
+                            dlines.append(f"**Current labels:** {lstr}")
+                        else:
+                            dlines.append("**Current labels:** *(none yet — first round)*")
+                        if packet.visible_history:
+                            dlines.append(
+                                f"**Visible history:** {len(packet.visible_history)} entry/entries"
+                            )
+                        else:
+                            dlines.append(
+                                f"**Visible history:** *(none — {visibility_mode})*"
+                            )
+                        entries.append("\n\n".join(dlines))
+                    continue  # always skip individual per-agent dispatch in Crowd
                 # ── What the hub sent to this agent ──────────────────────
                 packet = event.packet
                 lines = [f"#### 🔀 Hub → **{event.agent_name}**  ·  Cycle {event.cycle + 1}"]
@@ -477,6 +500,25 @@ for item_idx, row in subset.iterrows():
                 # Warn if nothing was parsed
                 if not output.labels and output.raw_response and not output.raw_response.startswith("[dry-run"):
                     lines.append(f"⚠️ **Raw response (parse failed):**\n```\n{output.raw_response}\n```")
+
+                entries.append("\n\n".join(lines))
+
+            elif event.kind == "aggregate":
+                # ── Round aggregate (Crowd protocol) ─────────────────────
+                output = event.output
+                label_str = "  ,  ".join(
+                    f"`{k}`: {v}" for k, v in output.labels.items()
+                ) if output.labels else "*(no consensus)*"
+
+                lines = [f"#### 🗳️ Round {event.cycle + 1} aggregate"]
+                lines.append(f"**Result:** {label_str}")
+
+                if output.probabilities:
+                    for fname, dist in output.probabilities.items():
+                        vote_parts = ", ".join(
+                            f"{code}: {p*100:.0f}%" for code, p in dist.items()
+                        )
+                        lines.append(f"**{fname} votes:** {vote_parts}")
 
                 entries.append("\n\n".join(lines))
 
@@ -544,5 +586,5 @@ _show_results(all_results, cfg)
 
 
 # ==================
-# TODO: bugs to fix:
-# i still get the `use_container_width` will be removed after 2025-12-31.` warning in 4.dataset when mapping the columns
+# TODO:
+# - add more LLM providers (Gemini, Anthropic, etc.) - not urgent, to add in the future

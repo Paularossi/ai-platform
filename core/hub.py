@@ -188,6 +188,14 @@ class CommunicationHub:
     def current_labels(self) -> dict[str, Any]:
         return copy.deepcopy(self._current_labels)
 
+    def set_current_labels(self, labels: dict[str, Any]) -> None:
+        """
+        Override the current label state directly.
+        Used by aggregating protocols (e.g. Crowd) to push the round's
+        aggregated result after all individual submissions are collected.
+        """
+        self._current_labels = copy.deepcopy(labels)
+
     @property
     def num_submissions(self) -> int:
         return len(self._log)
@@ -253,3 +261,5 @@ class CommunicationHub:
         for output in self._log:
             result[output.agent_name] = output  # later entries overwrite earlier
         return result
+
+#TODO: recompute the changed label for all agents against its own annotations from the previous round (not against the hub aggregation)

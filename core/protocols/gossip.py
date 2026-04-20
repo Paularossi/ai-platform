@@ -37,33 +37,12 @@ from __future__ import annotations
 
 import random
 from collections.abc import Iterator
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from core.agent import Agent
 from core.hub import CommunicationHub, ContextPacket
+from core.protocols import RunEvent
 from core.state import AgentOutput
-
-
-# ---------------------------------------------------------------------------
-# RunEvent - emitted by run_iter for each step
-# ---------------------------------------------------------------------------
-
-@dataclass
-class RunEvent:
-    """
-    A single step event emitted by the protocol generator.
-
-    kind == "dispatch"   : hub has built a context packet and is about to
-                           call the agent. packet is populated, output is None.
-    kind == "submission" : agent has returned its output and hub has stored it.
-                           output is populated, packet is the one that was sent.
-    """
-    kind: Literal["dispatch", "submission"]
-    cycle: int
-    agent_name: str
-    packet: ContextPacket
-    output: AgentOutput | None = None
 
 
 class GossipProtocol:
@@ -163,6 +142,7 @@ class GossipProtocol:
     def _build_agent_order(self, randomize: bool = False) -> list[Agent]:
         agents = list(self.agents)
 
+        # TODO: implement dynamic origin - randomize the originator per item, not just per cycle. Currently the initializer_agent is always fixed.
         if self.initializer_name:
             names = [a.name for a in agents]
             if self.initializer_name in names:

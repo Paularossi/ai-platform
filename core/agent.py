@@ -91,7 +91,7 @@ def _build_system_prompt(
 ) -> str:
     parts: list[str] = []
 
-    parts.append(f"You are {agent_name}, an AI annotation agent. Your role: {agent_role}.")
+    parts.append(f"You are {agent_name}. Your role: {agent_role}.")
     parts.append("")
 
     # Per-agent override prepended before base instructions
@@ -110,34 +110,71 @@ def _build_system_prompt(
         parts.append("")
 
     if questions:
-        parts.append("--- Classification questions ---")
-        parts.append(
-            "For EACH question, provide your answer in this exact block format:\n"
-            "\n"
-            "FIELD_NAME:\n"
-            "  verdict: CODE\n"
-            "  probabilities: CODE1=0.XX, CODE2=0.XX, ...   (all options, must sum to 1.0)\n"
-            "  confidence: 0.XX                              (probability of your verdict)\n"
-            "\n"
-            "After ALL questions, add a pros/cons section:\n"
-            "\n"
-            "pros:\n"
-            "  - <reason supporting the classification>\n"
-            "  - <reason supporting the classification>\n"
-            "cons:\n"
-            "  - <reason against or alternative reading>\n"
-            "  - <reason against or alternative reading>\n"
-            "\n"
-            "Rules:\n"
-            "- Probabilities must cover ALL listed option codes and sum to 1.0\n"
-            "- For multi-label fields, verdict lists all selected codes: CODE1, CODE2\n"
-            "- Do not add any text outside these blocks"
+        parts.append("--- Questions ---")
+
+        # Determine which field types are present so we only mention
+        # probabilities/confidence when there are actually option codes to distribute over.
+        choice_types = {"single_label", "multi_label"}
+        has_choice = any(
+            q.get("field_type", "single_label") in choice_types
+            for q in questions
         )
+
+        # Use the first real field name as the example so the model doesn't
+        # copy the placeholder literally into its response.
+        example_field = questions[0]["field_name"] if questions else "field_name"
+        fmt: list[str] = [
+            "For EACH question, respond using this exact block format:",
+            "",
+            f"{example_field}:",
+            "  verdict: <your answer>",
+        ]
+        if has_choice:
+            fmt += [
+                "  probabilities: CODE1=0.XX, CODE2=0.XX, ...   (choice fields only — must sum to 1.0)",
+                "  confidence: 0.XX                              (choice fields only)",
+            ]
+        fmt += [
+            "",
+            "After ALL questions, add:",
+            "pros:",
+            "  - <reason supporting your answers>",
+            "cons:",
+            "  - <reason against or alternative reading>",
+            "",
+            "Rules:",
+            "- Use the EXACT field name from each question as the block header — never "
+            "the word FIELD_NAME. "
+            "Expected headers (one per question): "
+            + "  ".join(f"{q['field_name']}:" for q in questions),
+            "- For single/multi-label fields: verdict is the option code (e.g. YES, NO)",
+            "- For multi-label fields: list all selected codes separated by commas",
+            "- For boolean fields: verdict is true or false",
+            "- For text fields: verdict is your free-text answer",
+            "- For score fields: verdict is a number",
+        ]
+        if has_choice:
+            fmt += [
+                "- Probabilities must cover ALL option codes and sum to 1.0",
+                "- Omit probabilities and confidence for text, score, and boolean fields",
+            ]
+        fmt.append("- Do not add any text outside these blocks")
+
+        parts.append("\n".join(fmt))
         parts.append("")
+
         for i, q in enumerate(questions, 1):
+            ftype = q.get("field_type", "single_label")
             parts.append(f"Q{i}. [{q['field_name']}] {q.get('instruction', '')}")
             for opt in q.get("options", []):
                 parts.append(f"   • {opt['code']}: {opt['description']}")
+            # Add a brief type hint for non-choice fields so the model isn't confused
+            if ftype == "boolean":
+                parts.append("   (verdict: true or false)")
+            elif ftype == "text":
+                parts.append("   (verdict: free-text answer, no option codes)")
+            elif ftype == "score":
+                parts.append("   (verdict: numeric score)")
         parts.append("")
 
     return "\n".join(parts)
@@ -147,7 +184,7 @@ def _build_user_message(packet: ContextPacket, questions: list[dict]) -> str:
     parts: list[str] = []
 
     # Item data (skip image keys - handled as vision input separately)
-    parts.append("--- Item to annotate ---")
+    parts.append("--- Item ---")
     for key, value in packet.item_data.items():
         if key.lower() in ("image", "image_url", "image_path"):
             continue
@@ -200,7 +237,7 @@ def _build_user_message(packet: ContextPacket, questions: list[dict]) -> str:
     if packet.cycle > 0 or packet.visible_history:
         parts.append(
             f"This is cycle {packet.cycle + 1}. "
-            "Review the current labels and revise any you disagree with, "
+            "Review the current answers and revise any you disagree with, "
             "or confirm them if you agree. Answer ALL questions."
         )
     else:
@@ -255,6 +292,9 @@ def _parse_output(
     current_field: str | None = None
     in_pros = False
     in_cons = False
+    # Positional fallback counter: if the model outputs the literal placeholder
+    # "FIELD_NAME:" instead of the real field name, map by occurrence order.
+    _placeholder_count = 0
 
     for line in lines:
         stripped = line.strip()
@@ -319,6 +359,19 @@ def _parse_output(
                     # field_name: CODE | reasoning  OR  field_name: CODE - reasoning
                     value_str = re.split(r"\s*[|\-]\s*", rest)[0].strip()
                     _store_label(fname, value_str, field_types, labels)
+                continue
+
+            # Positional fallback: the model output the literal placeholder
+            # "FIELD_NAME:" instead of a real field name.  Map by occurrence order
+            # so the Nth placeholder block → Nth question.
+            if fname.upper() == "FIELD_NAME":
+                if _placeholder_count < len(questions):
+                    current_field = questions[_placeholder_count]["field_name"]
+                    _placeholder_count += 1
+                    in_pros, in_cons = False, False
+                    if rest:
+                        value_str = re.split(r"\s*[|\-]\s*", rest)[0].strip()
+                        _store_label(current_field, value_str, field_types, labels)
                 continue
 
             # Sub-keys inside a field block (case-insensitive)
