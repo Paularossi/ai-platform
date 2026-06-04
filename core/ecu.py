@@ -9,8 +9,8 @@ Components
   PeerReviewRound
   ---------------
   Prompts each agent to score all other agents on the five quality
-  dimensions and report a coalition agreement score (0-1) per peer.
-  Returns a list of PeerReviewOutput objects.
+  dimensions. Coalition scores are not requested separately; they are
+  derived from the reported consensus dimension.
 
   Ecu formula (eq. 1 in simulation section):
     ecu_i = sum_q  w_q * (1/(n-1)) * sum_{j≠i} s_{ji}(q)
@@ -21,7 +21,7 @@ Components
   CoalitionTracker
   ----------------
   After each round's peer review, finds the largest subset of agents
-  with mutual coalition agreement ≥ τ (in both directions).
+  with mutual consensus scores ≥ τ (in both directions).
 
   EcuLedger
   ---------
@@ -80,9 +80,10 @@ DEFAULT_DIMENSIONS: list[dict] = [
         "name": "consensus",
         "label": "Consensus",
         "rubric": (
-            "Does the contribution constructively advance group agreement or "
-            "productively engage with opposing views? "
-            "0 = purely divisive; 1 = constructively bridges perspectives."
+            "Does the contribution move the deliberation toward a productive collective "
+            "outcome, either by building agreement, specifying conditions for agreement, "
+            "or clarifying constructive disagreement? "
+            "0 = blocks collective progress; 1 = strongly supports collective progress."
         ),
     },
 ]
@@ -164,9 +165,9 @@ class PeerReviewRound:
 
         lines.append(
             "Score each agent listed below on the five quality dimensions "
-            "(0.00 to 1.00 each). Also report a coalition agreement score "
-            "(0.00 = completely disagree with their position, "
-            "1.00 = fully agree) and a one-sentence justification."
+            "(0.00 to 1.00 each). The platform will derive coalitions from "
+            "the mutual consensus scores; do NOT report a separate coalition or agreement score. "
+            "Add a one-sentence justification for your review."
         )
         lines.append("")
         lines.append("Scoring rubrics:")
@@ -179,8 +180,7 @@ class PeerReviewRound:
             lines.append(f'  "{name}": {{')
             for dim in dim_names:
                 lines.append(f'    "{dim}": <score 0.00-1.00>,')
-            lines.append('    "coalition_agreement": <score 0.00-1.00>,')
-            lines.append('    "coalition_justification": "<one sentence>"')
+            lines.append('    "justification": "<one sentence>"')
             lines.append("  },")
         lines.append("}")
         lines.append("No other text. No markdown fences.")
@@ -213,7 +213,7 @@ class PeerReviewRound:
                 scores=scores,
                 self_scores=self_scores,
                 coalition_scores={n: 0.5 for n in all_contributions if n != reviewer_name},
-                coalition_justifications={n: "[dry-run]" for n in all_contributions if n != reviewer_name},
+                review_justifications={n: "[dry-run]" for n in all_contributions if n != reviewer_name},
                 raw_response="[dry-run]",
             )
 
@@ -242,18 +242,17 @@ class PeerReviewRound:
                     self_scores = dim_scores
                 else:
                     scores[name] = dim_scores
-                    try:
-                        coalition[name] = max(0.0, min(1.0, float(entry.get("coalition_agreement", 0.5))))
-                    except (ValueError, TypeError):
-                        coalition[name] = 0.5
-                    justifications[name] = str(entry.get("coalition_justification", ""))
+                    # Coalition is derived from the consensus quality score.
+                    # No separate agreement/coalition score is requested from agents.
+                    coalition[name] = dim_scores.get("consensus", 0.5)
+                    justifications[name] = str(entry.get("justification", ""))
 
         except Exception as exc:
             print(f"[PeerReviewRound] Parse error for {reviewer_name}: {exc}")
             for name in review_targets:
                 if name != reviewer_name:
                     scores[name] = {d: 0.5 for d in dim_names}
-                    coalition[name] = 0.5
+                    coalition[name] = scores[name].get("consensus", 0.5)
                     justifications[name] = ""
 
         return PeerReviewOutput(
@@ -262,7 +261,7 @@ class PeerReviewRound:
             scores=scores,
             self_scores=self_scores,
             coalition_scores=coalition,
-            coalition_justifications=justifications,
+            review_justifications=justifications,
             raw_response=raw,
         )
 
@@ -310,12 +309,12 @@ class CoalitionTracker:
     Finds the largest coalition given a round's peer review outputs.
 
     A coalition is a subset S ⊆ N such that for all i,j ∈ S (i≠j):
-        coalition_scores[i][j] ≥ τ  AND  coalition_scores[j][i] ≥ τ
+        consensus_score[i][j] ≥ τ  AND  consensus_score[j][i] ≥ τ
 
     Parameters
     ----------
     threshold : float
-        Minimum mutual agreement score τ (default 0.6).
+        Minimum mutual consensus score τ (default 0.6).
     """
 
     def __init__(self, threshold: float = 0.6):
@@ -329,7 +328,8 @@ class CoalitionTracker:
         Return the largest coalition from this round's peer review outputs.
         If multiple coalitions of the same size exist, returns the first found.
         """
-        # Build agreement matrix: agree[i][j] = score i gives j
+        # Build consensus matrix: agree[i][j] = consensus score reviewer i gives agent j.
+        # The attribute is still called coalition_scores for backward compatibility.
         agree: dict[str, dict[str, float]] = {}
         for r in reviews:
             agree[r.reviewer_name] = r.coalition_scores

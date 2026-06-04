@@ -155,6 +155,16 @@ class GossipProtocol:
                 packet=last_packet,
             )
 
+        # Coalition tracking must run before the ECU update is rendered, so the UI
+        # shows the coalition for the current cycle rather than the previous one.
+        full_coalition_reached = False
+        if self.coalition_tracker:
+            round_reviews = [r for r in hub.peer_review_log if r.cycle == cycle_idx]
+            coalition = self.coalition_tracker.find_coalition(round_reviews)
+            full_coalition_reached = len(coalition) == len(hub.agent_names)
+            if full_coalition_reached:
+                hub.converged = True
+
         # Compute ECUs after all reviews are in
         if hub.ledger:
             hub.compute_ecus_for_round(cycle_idx)
@@ -168,10 +178,8 @@ class GossipProtocol:
                 packet=last_packet,
             )
 
-        # Coalition tracking
-        if self.coalition_tracker:
-            round_reviews = [r for r in hub.peer_review_log if r.cycle == cycle_idx]
-            self.coalition_tracker.find_coalition(round_reviews)
+        if full_coalition_reached:
+            return
 
     def _build_agent_order(self, randomize: bool = False) -> list[Agent]:
         agents = list(self.agents)

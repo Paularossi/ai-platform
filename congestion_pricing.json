@@ -1,0 +1,96 @@
+{
+  "meta": {
+    "saved_at": "2026-06-04T14:26:39.438835Z",
+    "app_version": "0.1"
+  },
+  "overview": {
+    "name": "congestion pricing",
+    "author": "Paula",
+    "protocol_id": "0.1"
+  },
+  "task": {
+    "description": "Should the city introduce congestion charges on its inner ring road?"
+  },
+  "instructions": {
+    "base_instructions": "You are a policy advisor participating in a structured deliberation.\nWrite exactly one paragraph (50-150 words) arguing from your assigned perspective.\nBe specific — cite mechanisms, consequences, or evidence. Do not summarise other agents' views.",
+    "guideline_notes": ""
+  },
+  "agent_prompt_overrides": {
+    "Economist": "",
+    "Urban Planner": "",
+    "Citizens Advocate": ""
+  },
+  "agents": [
+    {
+      "name": "Economist",
+      "provider": "OpenAI",
+      "model": "gpt-4o",
+      "role": "Custom",
+      "custom_role": "Argue from welfare economics. Prioritise analytical depth and quantitative rigour — deadweight loss, revenue projections, empirical evidence from comparable cities.\n"
+    },
+    {
+      "name": "Urban Planner",
+      "provider": "OpenAI",
+      "model": "gpt-4o",
+      "role": "Custom",
+      "custom_role": "Balance accessibility and mobility. Prioritise completeness and breadth — spatial displacement effects, infrastructure investment needs, long-run land-use consequences.\n"
+    },
+    {
+      "name": "Citizens Advocate",
+      "provider": "OpenAI",
+      "model": "gpt-4o",
+      "role": "Custom",
+      "custom_role": "Represent distributional concerns. Prioritise clarity and equity — regressive incidence by income group, transit alternatives for low-income commuters, revenue redistribution proposals.\n"
+    }
+  ],
+  "protocol": {
+    "setting": "Crowd (parallel)",
+    "supervision_mode": "Unsupervised",
+    "visibility_mode": "Previous agent only",
+    "order_type": "Fixed",
+    "initializer_agent": "Agent 1",
+    "judge_agent": "Agent 3",
+    "max_cycles": 5,
+    "stopping_rule": "Either"
+  },
+  "ecu": {
+    "enabled": true,
+    "info_condition": "opaque",
+    "include_self_assessment": false,
+    "coalition_threshold": 0.8,
+    "dimensions": [
+      {
+        "name": "depth_breadth",
+        "label": "Depth-Breadth",
+        "weight": 1.0
+      },
+      {
+        "name": "depth",
+        "label": "Depth",
+        "weight": 1.0
+      },
+      {
+        "name": "clarity",
+        "label": "Clarity",
+        "weight": 1.0
+      },
+      {
+        "name": "completeness",
+        "label": "Completeness",
+        "weight": 1.0
+      },
+      {
+        "name": "consensus",
+        "label": "Consensus",
+        "weight": 1.0
+      }
+    ]
+  },
+  "dataset": {
+    "source": "single_topic",
+    "num_rows": 1,
+    "columns": [
+      "topic"
+    ]
+  }
+}

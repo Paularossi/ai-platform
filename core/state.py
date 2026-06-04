@@ -112,10 +112,10 @@ class PeerReviewOutput:
         Self-assessment scores {dimension: score}.
         None when self-assessment is disabled.
     coalition_scores : dict[str, float]
-        {agent_name: agreement_score in [0, 1]}
-        How much this reviewer agrees with each other agent's position.
-    coalition_justifications : dict[str, str]
-        {agent_name: brief explanation of the coalition score}
+        {agent_name: consensus_score in [0, 1]}
+        Backward-compatible field name. Coalitions are derived from mutual consensus scores.
+    review_justifications : dict[str, str]
+        {agent_name: brief explanation of the peer review}
     raw_response : str | None
     timestamp : str
     """
@@ -124,7 +124,8 @@ class PeerReviewOutput:
     scores: dict[str, dict[str, float]] = field(default_factory=dict)
     self_scores: dict[str, float] | None = None
     coalition_scores: dict[str, float] = field(default_factory=dict)
-    coalition_justifications: dict[str, str] = field(default_factory=dict)
+    review_justifications: dict[str, str] = field(default_factory=dict)
+    coalition_justifications: dict[str, str] = field(default_factory=dict)  # deprecated alias
     raw_response: str | None = None
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
@@ -135,6 +136,7 @@ class PeerReviewOutput:
             "scores": self.scores,
             "self_scores": self.self_scores,
             "coalition_scores": self.coalition_scores,
+            "review_justifications": self.review_justifications,
             "coalition_justifications": self.coalition_justifications,
             "raw_response": self.raw_response,
             "timestamp": self.timestamp,

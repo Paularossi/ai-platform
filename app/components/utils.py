@@ -1,13 +1,15 @@
+import sys
+from pathlib import Path
 import streamlit as st
+import pandas as pd
+
+_ROOT = Path(__file__).resolve().parents[2]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 
 def restore_draft(loaded: dict) -> None:
-    """
-    Restore a full experiment config dict (previously saved as JSON) into
-    session state. Called from both Main.py (on upload) and the Review page.
-    After calling this, st.switch_page("pages/5_Review.py") to show the summary.
-    """
-    # Store the raw config so Review page can read it
+    """Restore a saved experiment JSON into session state."""
     st.session_state.experiment_config = {
         k: v for k, v in loaded.items() if k != "meta"
     }
@@ -18,15 +20,10 @@ def restore_draft(loaded: dict) -> None:
     st.session_state.protocol_id = ov.get("protocol_id", "")
 
     task = loaded.get("task", {})
-    st.session_state.task_category = task.get("category", "")
-    st.session_state.modalities = task.get("modalities", [])
     st.session_state.task_description = task.get("description", "")
-    st.session_state.task_mode = task.get("mode", "deliberation")
-
-    schemas = loaded.get("schemas", {})
-    st.session_state.input_fields = schemas.get("input_fields", [])
-
-    st.session_state.question_sets = loaded.get("questions", [])
+    if st.session_state.task_description:
+        st.session_state.dataset_df = pd.DataFrame([{"topic": st.session_state.task_description}])
+        st.session_state.column_mapping = {"topic": "topic"}
 
     instr = loaded.get("instructions", {})
     st.session_state.base_instructions = instr.get("base_instructions", "")
@@ -37,10 +34,9 @@ def restore_draft(loaded: dict) -> None:
     st.session_state.num_agents = len(st.session_state.agents)
 
     proto = loaded.get("protocol", {})
-    st.session_state.interaction_setting = proto.get("setting", "Gossip (sequential)")
-    st.session_state.platform_mode = proto.get("platform_mode", "Multi-platform")
+    st.session_state.interaction_setting = proto.get("setting", "Crowd (parallel)")
     st.session_state.supervision_mode = proto.get("supervision_mode", "Unsupervised")
-    st.session_state.visibility_mode = proto.get("visibility_mode", "Current state only")
+    st.session_state.visibility_mode = proto.get("visibility_mode", "Summary only")
     st.session_state.order_type = proto.get("order_type", "Fixed")
     st.session_state.max_cycles = proto.get("max_cycles", 5)
     st.session_state.stopping_rule = proto.get("stopping_rule", "Either")
@@ -49,24 +45,3 @@ def restore_draft(loaded: dict) -> None:
 
     ds = loaded.get("dataset", {})
     st.session_state.column_mapping = ds.get("column_mapping", {})
-
-
-def output_fields_from_question_sets(question_sets):
-    fields = []
-    for q in question_sets:
-        field_type_map = {
-            "single_label": "Single-label",
-            "multi_label": "Multi-label",
-            "boolean": "Boolean",
-            "score": "Score",
-            "text": "Text",
-            "ranking": "Ranking",
-        }
-
-        fields.append(
-            {
-                "name": q.get("field_name", ""),
-                "type": field_type_map.get(q.get("field_type", "single_label"), "Single-label")
-            }
-        )
-    return fields

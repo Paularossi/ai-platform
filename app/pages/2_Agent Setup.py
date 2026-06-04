@@ -119,16 +119,15 @@ init_agent_state()
 
 # ---------- sidebar ----------
 st.sidebar.title("Experiment Builder")
-st.sidebar.caption("Step 2 of 5")
-st.sidebar.progress(2 / 5)
+st.sidebar.caption("Step 2 of 4")
+st.sidebar.progress(2 / 4)
 st.sidebar.markdown(
     """
 **Steps**
-1. Task
+1. Overview
 2. Agents
-3. Instructions
-4. Dataset
-5. Review
+3. Instructions & topic
+4. Review
 """
 )
 
@@ -290,7 +289,7 @@ with main_col:
                 index=stopping_options.index(st.session_state.stopping_rule),
             )
 
-        st.info("Next: define agent instructions →")
+        st.info("Next: define the deliberation topic and agent instructions →")
 
     with st.container(border=True):
         st.subheader("5. ECU quality dimensions")

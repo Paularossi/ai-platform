@@ -6,6 +6,7 @@
 # 2. make it exciting
 # 3. professional use for whatever purposes
 
+# guiding question: Should the city introduce congestion charges on its inner ring road?
 import json
 
 import streamlit as st
@@ -47,16 +48,15 @@ with left:
         st.subheader("Start new experiment")
         st.markdown(
             "Set up a new experiment from scratch using the step-by-step builder. "
-            "Configure your task, agents, protocol, instructions, and dataset."
+            "Configure your experiment, agents, protocol, instructions, and deliberation topic."
         )
         st.markdown(
             """
 **Steps**
-1. Task & schema
+1. Overview
 2. Agent setup
-3. Instructions & prompts
-4. Dataset upload
-5. Review & launch
+3. Instructions & topic
+4. Review & launch
 """
         )
         st.write("")
@@ -90,14 +90,12 @@ with right:
                 author = ov.get("author") or "—"
                 protocol = loaded.get("protocol", {})
                 n_agents = len(loaded.get("agents", []))
-                n_questions = len(loaded.get("questions", []))
                 saved_at = loaded.get("meta", {}).get("saved_at", "")
 
                 st.info(
                     f"**{exp_name}**  \n"
                     f"Author: {author}  ·  "
                     f"{n_agents} agent(s)  ·  "
-                    f"{n_questions} question(s)  ·  "
                     f"Protocol: {protocol.get('setting', '—')}  \n"
                     + (f"Saved: {saved_at[:10]}" if saved_at else ""),
                     icon="📋",
@@ -105,7 +103,7 @@ with right:
 
                 if st.button("→ Load & review", type="primary", width='stretch'):
                     restore_draft(loaded)
-                    st.switch_page("pages/5_Review.py")
+                    st.switch_page("pages/4_Review.py")
 
             except Exception as e:
                 st.error(f"Could not read file: {e}")
