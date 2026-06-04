@@ -30,6 +30,7 @@ from core.hub import CommunicationHub
 from core.protocols import RunEvent
 from core.protocols.gossip import GossipProtocol
 from core.state import AgentOutput
+from core.ecu import EcuLedger, PeerReviewRound, CoalitionTracker, DEFAULT_DIMENSIONS
 
 st.set_page_config(page_title="Run Experiment", page_icon="🚀", layout="wide")
 
@@ -60,21 +61,17 @@ def build_agents(cfg: dict) -> list[Agent]:
     return [Agent(a, cfg) for a in cfg.get("agents", [])]
 
 
-def build_protocol(agents: list[Agent], cfg: dict, dry_run: bool):
+def build_protocol(agents: list[Agent], cfg: dict, dry_run: bool,
+                   peer_reviewer=None, coalition_tracker=None):
     """Return the correct protocol instance based on the configured setting."""
     setting = cfg.get("protocol", {}).get("setting", "Gossip (sequential)")
     if setting == "Gossip (sequential)":
-        return GossipProtocol(agents, cfg, dry_run=dry_run)
+        return GossipProtocol(agents, cfg, peer_reviewer=peer_reviewer,
+                              coalition_tracker=coalition_tracker, dry_run=dry_run)
     elif setting == "Crowd (parallel)":
         from core.protocols.crowd import CrowdProtocol
-        return CrowdProtocol(agents, cfg, dry_run=dry_run)
-    # Future protocols slot in here:
-    # elif setting == "Duel (debate)":
-    #     from core.protocols.duel import DuelProtocol
-    #     return DuelProtocol(agents, cfg, dry_run=dry_run)
-    # elif setting == "Court (judge-based)":
-    #     from core.protocols.court import CourtProtocol
-    #     return CourtProtocol(agents, cfg, dry_run=dry_run)
+        return CrowdProtocol(agents, cfg, peer_reviewer=peer_reviewer,
+                             coalition_tracker=coalition_tracker, dry_run=dry_run)
     raise ValueError(f"Unknown protocol setting: '{setting}'")
 
 
@@ -90,39 +87,26 @@ def resolve_image_path(
     dataset_cfg: dict,
     zip_bytes: bytes | None,
 ) -> str | None:
-    """
-    Try to find the image file on disk.
-    Checks the dataset folder path stored in session state.
-    Handles the _img suffix mismatch (strips it if needed).
-    """
+    """Try to find the image file on disk for a given item_id stem."""
     image_dir = st.session_state.get("dataset_image_dir")
     if not image_dir:
         return None
 
-    # First try direct lookup built during ZIP extraction.
     lookup: dict[str, str] = st.session_state.get("dataset_image_lookup", {}) or {}
-    stems_to_try = [item_id, item_id.replace("_img", "")]
-    for stem in stems_to_try:
-        norm = _normalize_image_key(stem)
-        if norm in lookup and os.path.exists(lookup[norm]):
-            return lookup[norm]
+    norm = _normalize_image_key(item_id)
 
-    # Fallback scan of the image directory (handles mixed-case extensions).
+    # Direct lookup from ZIP extraction
+    if norm in lookup and os.path.exists(lookup[norm]):
+        return lookup[norm]
+
+    # Fallback scan of the image directory
     try:
-        by_stem: dict[str, str] = {}
         for name in os.listdir(image_dir):
             full = os.path.join(image_dir, name)
-            if not os.path.isfile(full):
-                continue
-            stem = os.path.splitext(name)[0]
-            by_stem[_normalize_image_key(stem)] = full
-
-        for stem in stems_to_try:
-            norm = _normalize_image_key(stem)
-            if norm in by_stem:
-                return by_stem[norm]
+            if os.path.isfile(full) and _normalize_image_key(os.path.splitext(name)[0]) == norm:
+                return full
     except Exception:
-        return None
+        pass
 
     return None
 
@@ -155,17 +139,26 @@ def results_to_df(results: list[dict]) -> pd.DataFrame:
             "num_turns": r["num_turns"],
             "originator": r["originator_name"],
         }
-        # Final labels
-        for fname, val in r["final_labels"].items():
-            row[f"final_{fname}"] = val if not isinstance(val, list) else ", ".join(val)
-        # Originator labels
-        for fname, val in r["originator_labels"].items():
-            row[f"orig_{fname}"] = val if not isinstance(val, list) else ", ".join(val)
-        # Did final == originator for each field?
-        for fname in r["final_labels"]:
-            row[f"changed_{fname}"] = (
-                r["final_labels"].get(fname) != r["originator_labels"].get(fname)
-            )
+        final = r.get("final_contribution")
+        orig = r.get("originator_contribution")
+
+        if isinstance(final, dict):
+            # Classification task — expand fields as columns
+            for fname, val in final.items():
+                row[f"final_{fname}"] = val if not isinstance(val, list) else ", ".join(val)
+            if isinstance(orig, dict):
+                for fname, val in orig.items():
+                    row[f"orig_{fname}"] = val if not isinstance(val, list) else ", ".join(val)
+                for fname in final:
+                    row[f"changed_{fname}"] = (
+                        final.get(fname) != orig.get(fname)
+                    )
+        else:
+            # Deliberation task — store as single text column
+            row["final_contribution"] = str(final) if final else ""
+            row["orig_contribution"] = str(orig) if orig else ""
+            row["changed"] = final != orig
+
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -178,17 +171,18 @@ cfg = get_config()
 # ── Guard: check experiment is configured ─────────────────────────────────────
 agents_cfg = cfg.get("agents", [])
 questions = cfg.get("questions", [])
+task_mode = cfg.get("task", {}).get("mode", "deliberation")
 dataset_cfg = cfg.get("dataset", {})
 df: pd.DataFrame | None = st.session_state.get("dataset_df")
 column_mapping: dict = st.session_state.get("column_mapping", {})
 
 missing = []
 if not agents_cfg:
-    missing.append("No agents configured - go to Step 2")
-if not questions:
-    missing.append("No questions loaded - go to Step 3")
+    missing.append("No agents configured — go to Step 2")
+if task_mode == "classification" and not questions:
+    missing.append("Classification task with no questions loaded — go to Step 3")
 if df is None:
-    missing.append("No dataset loaded - go to Step 4")
+    missing.append("No dataset loaded — go to Step 4")
 
 if missing:
     st.error("Cannot run - please complete setup first:")
@@ -294,27 +288,33 @@ st.session_state.pop("run_results", None)
 if not dry_run and api_key_input:
     os.environ["OPENAI_API_KEY"] = api_key_input
 
-# ── Build agents and protocol ─────────────────────────────────────────────────
+# ── Build agents ──────────────────────────────────────────────────────────────
 agents = build_agents(cfg)
-protocol = build_protocol(agents, cfg, dry_run=dry_run)
 agent_names = [a.name for a in agents]
 visibility_mode = proto.get("visibility_mode", "Current state only")
 
 # ── Diagnostics ───────────────────────────────────────────────────────────────
-with st.expander("🔍 Pre-run diagnostics (expand if labels are empty)", expanded=False):
-    st.markdown(f"**Questions loaded:** {len(cfg.get('questions', []))}")
+with st.expander("🔍 Pre-run diagnostics", expanded=False):
+    st.markdown(f"**Task mode:** {task_mode}")
     st.markdown(f"**Agents:** {[a.name for a in agents]}")
     st.markdown(f"**Visibility mode:** {visibility_mode}")
     st.markdown(f"**Column mapping:** {st.session_state.get('column_mapping', {})}")
- 
-    # ── Image diagnostics ─────────────────────────────────────────────────
-    st.divider()
-    st.markdown("**Image resolution diagnostics**")
-    img_dir = st.session_state.get("dataset_image_dir")
-    if not img_dir:
-        st.error("`dataset_image_dir` is not set — images will not be loaded. "
-                 "Go back to Step 4 and re-upload your ZIP file.")
+
+    if task_mode == "classification":
+        if cfg.get("questions"):
+            st.markdown("**Question fields:** " + ", ".join(
+                f"`{q['field_name']}`" for q in cfg["questions"]
+            ))
+        else:
+            st.error("⚠️ No questions found — agents will return empty labels. Go to Step 3 and load your question set JSON.")
     else:
+        st.info("Deliberation mode — no questions required. Agents produce free-text contributions.")
+
+    # Image diagnostics (only relevant when images are in the dataset)
+    img_dir = st.session_state.get("dataset_image_dir")
+    if img_dir:
+        st.divider()
+        st.markdown("**Image resolution diagnostics**")
         st.success(f"Image temp dir: `{img_dir}`")
         try:
             files_on_disk = os.listdir(img_dir)
@@ -322,26 +322,8 @@ with st.expander("🔍 Pre-run diagnostics (expand if labels are empty)", expand
             st.code("\n".join(files_on_disk[:10]))
         except Exception as e:
             st.error(f"Cannot list temp dir: {e}")
- 
-        # Show how the first 3 rows of the dataset would resolve
-        diag_subset = df.head(3)
-        st.markdown("**Sample item_id → image path resolution (first 3 rows):**")
-        for _, diag_row in diag_subset.iterrows():
-            diag_id = str(diag_row.get(
-                column_mapping.get("image", column_mapping.get("id", df.columns[0])),
-                "?"
-            ))
-            diag_path = resolve_image_path(diag_id, dataset_cfg, None)
-            if diag_path:
-                st.markdown(f"- `{diag_id}` → ✅ `{diag_path}`")
-            else:
-                st.markdown(f"- `{diag_id}` → ❌ not found")
-    if cfg.get("questions"):
-        st.markdown("**Question field names:** " + ", ".join(
-            f"`{q['field_name']}`" for q in cfg["questions"]
-        ))
-    else:
-        st.error("⚠️ No questions found in experiment config - agents will have nothing structured to answer and labels will be empty. Go back to Step 3 and load your question set JSON.")
+
+    st.divider()
     if agents:
         st.markdown("**System prompt preview (Agent 1):**")
         from core.agent import _build_system_prompt
@@ -351,9 +333,28 @@ with st.expander("🔍 Pre-run diagnostics (expand if labels are empty)", expand
             base_instructions=cfg.get("instructions", {}).get("base_instructions", ""),
             guideline_notes=cfg.get("instructions", {}).get("guideline_notes", ""),
             agent_overrides=cfg.get("agent_prompt_overrides", {}),
-            questions=cfg.get("questions", []),
+            questions=cfg.get("questions", []) if task_mode == "classification" else [],
         )
         st.code(preview, language=None)
+
+# ── Build ECU peer reviewer and ledger (if enabled) ───────────────────────────
+ecu_cfg = cfg.get("ecu", {})
+ecu_enabled = ecu_cfg.get("enabled", False)
+ecu_info_condition = ecu_cfg.get("info_condition", "opaque")
+include_self_assessment = ecu_cfg.get("include_self_assessment", False)
+coalition_threshold = float(ecu_cfg.get("coalition_threshold", 0.6))
+
+peer_reviewer: PeerReviewRound | None = None
+if ecu_enabled:
+    dim_configs = ecu_cfg.get("dimensions") or DEFAULT_DIMENSIONS
+    active_dims = [d for d in DEFAULT_DIMENSIONS if d["name"] in {dd["name"] for dd in dim_configs}]
+    peer_reviewer = PeerReviewRound(
+        dimensions=active_dims,
+        include_self_assessment=include_self_assessment,
+        dry_run=dry_run,
+    )
+    if dry_run:
+        st.info("ECU peer review is in dry-run mode — all scores will be 0.5.", icon="💡")
 
 # ── Slice dataset ─────────────────────────────────────────────────────────────
 subset = df.head(int(n_items)).reset_index(drop=True)
@@ -372,13 +373,38 @@ status_rows: list[dict] = []
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 for item_idx, row in subset.iterrows():
-    item_id = str(row.get(
-        column_mapping.get("image", column_mapping.get("id", df.columns[0])),
-        f"item_{item_idx}"
-    ))
+    id_col = column_mapping.get("id", column_mapping.get("image", None))
+    if id_col and id_col in df.columns:
+        item_id = str(row[id_col])
+    elif len(df.columns) > 0:
+        item_id = str(row[df.columns[0]])
+    else:
+        item_id = f"item_{item_idx}"
 
     image_path = resolve_image_path(item_id, dataset_cfg, None)
     item_data = build_item_data(row, column_mapping, image_path)
+
+    # Build a fresh ledger and coalition tracker per item
+    item_ledger: EcuLedger | None = None
+    item_coalition: CoalitionTracker | None = None
+    if ecu_enabled and peer_reviewer:
+        dim_configs = ecu_cfg.get("dimensions") or DEFAULT_DIMENSIONS
+        weights = {d["name"]: float(d.get("weight", 1.0)) for d in dim_configs}
+        active_dims = [d for d in DEFAULT_DIMENSIONS if d["name"] in weights]
+        item_ledger = EcuLedger(
+            agent_names=agent_names,
+            dimensions=active_dims,
+            weights=weights,
+            include_self_assessment=include_self_assessment,
+        )
+        item_coalition = CoalitionTracker(threshold=coalition_threshold)
+
+    # Build protocol fresh per item (coalition tracker is per-item)
+    protocol = build_protocol(
+        agents, cfg, dry_run=dry_run,
+        peer_reviewer=peer_reviewer,
+        coalition_tracker=item_coalition,
+    )
 
     # Create hub for this item
     hub = CommunicationHub(
@@ -386,17 +412,15 @@ for item_idx, row in subset.iterrows():
         item_data=item_data,
         visibility_mode=visibility_mode,
         agent_names=agent_names,
+        ledger=item_ledger,
+        ecu_info_condition=ecu_info_condition,
     )
 
     # ── Live turn feed for this item ──────────────────────────────────────
     with st.expander(f"📄 Item {item_idx + 1} / {len(subset)}  -  `{item_id}`", expanded=True):
 
         if item_data.get("image_path"):
-            st.caption(f"Image attached for this item: {item_data['image_path']}")
-        else:
-            st.warning(
-                "No image attached for this item. The run will be text-only unless image resolution succeeds."
-            )
+            st.caption(f"Image: {item_data['image_path']}")
 
         feed = st.empty()
         entries: list[str] = []   # accumulated markdown lines rendered all at once
@@ -412,9 +436,6 @@ for item_idx, row in subset.iterrows():
 
             if event.kind == "dispatch":
                 if is_crowd:
-                    # Render a context block only when starting a NEW round after a
-                    # failed convergence check (cycle > 0).  Round 1 (cycle 0) is
-                    # always silent — no convergence decision has been made yet.
                     if event.cycle > 0 and event.cycle != _last_crowd_cycle_rendered:
                         _last_crowd_cycle_rendered = event.cycle
                         packet = event.packet
@@ -423,48 +444,46 @@ for item_idx, row in subset.iterrows():
                             f"#### 📬 Round {event.cycle + 1} · Context sent to all agents",
                             f"**Agents:** {', '.join(agent_list)}",
                         ]
-                        if packet.current_labels:
-                            lstr = "  ,  ".join(
-                                f"`{k}`: {v}" for k, v in packet.current_labels.items()
-                            )
-                            dlines.append(f"**Current labels:** {lstr}")
+                        current = packet.current_contribution
+                        if isinstance(current, dict) and current:
+                            lstr = "  ,  ".join(f"`{k}`: {v}" for k, v in current.items())
+                            dlines.append(f"**Current answers:** {lstr}")
+                        elif isinstance(current, str) and current.strip():
+                            dlines.append(f"**Current position:** {current}")
                         else:
-                            dlines.append("**Current labels:** *(none yet — first round)*")
+                            dlines.append("**Current state:** *(none yet — first round)*")
                         if packet.visible_history:
-                            dlines.append(
-                                f"**Visible history:** {len(packet.visible_history)} entry/entries"
-                            )
+                            dlines.append(f"**Visible history:** {len(packet.visible_history)} entry/entries")
                         else:
-                            dlines.append(
-                                f"**Visible history:** *(none — {visibility_mode})*"
-                            )
+                            dlines.append(f"**Visible history:** *(none — {visibility_mode})*")
                         entries.append("\n\n".join(dlines))
-                    continue  # always skip individual per-agent dispatch in Crowd
+                    continue
+
                 # ── What the hub sent to this agent ──────────────────────
                 packet = event.packet
                 lines = [f"#### 🔀 Hub → **{event.agent_name}**  ·  Cycle {event.cycle + 1}"]
 
-                if packet.current_labels:
-                    label_str = "  ,  ".join(
-                        f"`{k}`: {v}" for k, v in packet.current_labels.items()
-                    )
-                    lines.append(f"**Current labels:** {label_str}")
+                current = packet.current_contribution
+                if isinstance(current, dict) and current:
+                    label_str = "  ,  ".join(f"`{k}`: {v}" for k, v in current.items())
+                    lines.append(f"**Current answers:** {label_str}")
+                elif isinstance(current, str) and current.strip():
+                    lines.append(f"**Current position:** {current}")
                 else:
-                    lines.append("**Current labels:** *(none yet)*")
+                    lines.append("**Current state:** *(none yet)*")
 
                 if packet.visible_history:
                     lines.append(f"**Visible history** ({len(packet.visible_history)} entry/entries):")
                     for h in packet.visible_history:
-                        h_labels = "  ,  ".join(f"`{k}`: {v}" for k, v in h.labels.items())
-                        pros_note = ""
-                        real_pros = [p for p in h.pros if p != "[dry-run placeholder]"]
-                        if real_pros:
-                            pros_note = f"  \n  *{real_pros[0]}*"
-                        lines.append(
-                            f"- Cycle {h.cycle + 1} · **{h.agent_name}**: {h_labels}{pros_note}"
-                        )
+                        if h.is_classification:
+                            h_str = "  ,  ".join(f"`{k}`: {v}" for k, v in h.labels.items())
+                        else:
+                            h_str = str(h.contribution)[:120]
+                        real_pros = [p for p in h.pros if p not in ("[dry-run]", "[dry-run placeholder]")]
+                        pros_note = f"  \n  *{real_pros[0]}*" if real_pros else ""
+                        lines.append(f"- Cycle {h.cycle + 1} · **{h.agent_name}**: {h_str}{pros_note}")
                 else:
-                    lines.append(f"**Visible history:** *(none - visibility mode: {visibility_mode})*")
+                    lines.append(f"**Visible history:** *(none — visibility mode: {visibility_mode})*")
 
                 entries.append("\n\n".join(lines))
 
@@ -474,31 +493,34 @@ for item_idx, row in subset.iterrows():
                 changed_fields = [f for f, c in output.changed.items() if c]
                 change_note = f"✏️ revised: {', '.join(changed_fields)}" if changed_fields else "✔ no changes"
 
-                label_str = "  ,  ".join(
-                    f"`{k}`: {v}" for k, v in output.labels.items()
-                ) if output.labels else "*(no labels parsed)*"
-
                 lines = [f"#### 📨 **{event.agent_name}** → Hub  ·  {change_note}"]
-                lines.append(f"**Labels:** {label_str}")
 
-                # Probabilities per field
-                if output.probabilities:
-                    for fname, probs in output.probabilities.items():
-                        conf_val = output.confidence.get(fname)
-                        conf_str = f"  *(confidence: {conf_val:.2f})*" if conf_val is not None else ""
-                        prob_parts = ", ".join(f"{code}={p:.2f}" for code, p in probs.items())
-                        lines.append(f"**{fname} distribution:** {prob_parts}{conf_str}")
+                if output.is_classification:
+                    label_str = "  ,  ".join(
+                        f"`{k}`: {v}" for k, v in output.labels.items()
+                    ) if output.labels else "*(no labels parsed)*"
+                    lines.append(f"**Answers:** {label_str}")
+                    if output.prob_distribution:
+                        for fname, probs in output.prob_distribution.items():
+                            conf_str = f"  *(confidence: {output.confidence:.2f})*" if output.confidence is not None else ""
+                            prob_parts = ", ".join(f"{code}={p:.2f}" for code, p in probs.items())
+                            lines.append(f"**{fname} distribution:** {prob_parts}{conf_str}")
+                else:
+                    contrib = str(output.contribution) if output.contribution else "*(empty)*"
+                    lines.append(f"**Contribution:** {contrib}")
+                    if output.confidence is not None:
+                        lines.append(f"**Confidence:** {output.confidence:.2f}")
 
-                # Pros / cons
                 if output.pros:
-                    lines.append("**Pros:** " + " · ".join(f"_{p}_" for p in output.pros
-                                                            if p != "[dry-run placeholder]"))
+                    real_pros = [p for p in output.pros if p not in ("[dry-run]", "[dry-run placeholder]")]
+                    if real_pros:
+                        lines.append("**Pros:** " + " · ".join(f"_{p}_" for p in real_pros))
                 if output.cons:
-                    lines.append("**Cons:** " + " · ".join(f"_{c}_" for c in output.cons
-                                                            if c != "[dry-run placeholder]"))
+                    real_cons = [c for c in output.cons if c not in ("[dry-run]", "[dry-run placeholder]")]
+                    if real_cons:
+                        lines.append("**Cons:** " + " · ".join(f"_{c}_" for c in real_cons))
 
-                # Warn if nothing was parsed
-                if not output.labels and output.raw_response and not output.raw_response.startswith("[dry-run"):
+                if not output.contribution and output.raw_response and not output.raw_response.startswith("[dry-run"):
                     lines.append(f"⚠️ **Raw response (parse failed):**\n```\n{output.raw_response}\n```")
 
                 entries.append("\n\n".join(lines))
@@ -506,15 +528,16 @@ for item_idx, row in subset.iterrows():
             elif event.kind == "aggregate":
                 # ── Round aggregate (Crowd protocol) ─────────────────────
                 output = event.output
-                label_str = "  ,  ".join(
-                    f"`{k}`: {v}" for k, v in output.labels.items()
-                ) if output.labels else "*(no consensus)*"
+                if output.is_classification and output.labels:
+                    label_str = "  ,  ".join(f"`{k}`: {v}" for k, v in output.labels.items())
+                else:
+                    label_str = "*(no consensus)*"
 
                 lines = [f"#### 🗳️ Round {event.cycle + 1} aggregate"]
                 lines.append(f"**Result:** {label_str}")
 
-                if output.probabilities:
-                    for fname, dist in output.probabilities.items():
+                if output.prob_distribution:
+                    for fname, dist in output.prob_distribution.items():
                         vote_parts = ", ".join(
                             f"{code}: {p*100:.0f}%" for code, p in dist.items()
                         )
@@ -522,27 +545,83 @@ for item_idx, row in subset.iterrows():
 
                 entries.append("\n\n".join(lines))
 
+            elif event.kind == "peer_review":
+                # ── Phase 2: one agent's peer review completed ────────────
+                # Find the review in the hub log
+                round_reviews = [
+                    r for r in hub.peer_review_log
+                    if r.cycle == event.cycle and r.reviewer_name == event.agent_name
+                ]
+                if round_reviews:
+                    review = round_reviews[-1]
+                    lines = [f"#### 📋 **{event.agent_name}** peer review  ·  Cycle {event.cycle + 1}"]
+                    for reviewed, dim_scores in review.scores.items():
+                        score_str = "  ,  ".join(
+                            f"{d}: {s:.2f}" for d, s in dim_scores.items()
+                        )
+                        coalition_score = review.coalition_scores.get(reviewed, None)
+                        coalition_str = f"  ·  coalition: **{coalition_score:.2f}**" if coalition_score is not None else ""
+                        justification = review.coalition_justifications.get(reviewed, "")
+                        lines.append(
+                            f"→ **{reviewed}**: {score_str}{coalition_str}"
+                            + (f"  \n  _{justification}_" if justification and justification != "[dry-run]" else "")
+                        )
+                    if review.self_scores:
+                        self_str = "  ,  ".join(f"{d}: {s:.2f}" for d, s in review.self_scores.items())
+                        lines.append(f"→ **Self**: {self_str}")
+                    entries.append("\n\n".join(lines))
+
+            elif event.kind == "ecu_update":
+                # ── ECU balances updated after full peer review round ─────
+                balances = hub.ecu_balances
+                if balances:
+                    lines = [f"#### 💰 ECU update  ·  after Cycle {event.cycle + 1}"]
+                    bal_str = "  ·  ".join(
+                        f"**{name}**: {bal:.3f}" for name, bal in balances.items()
+                    )
+                    lines.append(f"Cumulative balances: {bal_str}")
+
+                    # Show coalition if available
+                    if item_coalition and item_coalition.history:
+                        last_coalition = item_coalition.history[-1]
+                        c = last_coalition.get("coalition", [])
+                        lines.append(
+                            f"Coalition (τ={coalition_threshold}): "
+                            + (f"**{', '.join(c)}**" if c else "*(none)*")
+                        )
+                    entries.append("\n\n".join(lines))
+
             # Re-render the full feed after every event
             feed.markdown("\n\n---\n\n".join(entries))
 
         elapsed = time.time() - t_start
 
         # Final state for this item
-        final_labels = hub.current_labels
+        final = hub.current_contribution
         st.success(
             f"{'✅ Converged' if hub.converged else '⏹ Stopped'}  ·  "
             f"{hub.num_submissions} turn(s)  ·  {elapsed:.1f}s"
         )
 
-        # Show final labels
-        if final_labels:
-            st.markdown("**Final labels:**")
-            label_cols = st.columns(min(len(final_labels), 4))
-            for col, (fname, val) in zip(label_cols, final_labels.items()):
+        # Show final contribution
+        if isinstance(final, dict) and final:
+            st.markdown("**Final answers:**")
+            label_cols = st.columns(min(len(final), 4))
+            for col, (fname, val) in zip(label_cols, final.items()):
                 display_val = ", ".join(val) if isinstance(val, list) else str(val)
                 col.metric(fname, display_val)
+        elif isinstance(final, str) and final.strip():
+            st.markdown("**Final contribution:**")
+            st.info(final)
         else:
-            st.warning("No labels were returned by any agent for this item.")
+            st.warning("No contribution was returned by any agent for this item.")
+
+        # ECU balances
+        if hub.ecu_balances:
+            st.markdown("**ECU balances:**")
+            bal_cols = st.columns(len(hub.ecu_balances))
+            for col, (name, bal) in zip(bal_cols, hub.ecu_balances.items()):
+                col.metric(name, f"{bal:.3f}")
 
     # Store result
     result = {
@@ -550,18 +629,25 @@ for item_idx, row in subset.iterrows():
         "converged": hub.converged,
         "num_turns": hub.num_submissions,
         "originator_name": hub.originator_name,
-        "originator_labels": hub.originator_labels,
-        "final_labels": hub.current_labels,
+        "originator_contribution": hub.originator_contribution,
+        "final_contribution": hub.current_contribution,
+        "ecu_balances": hub.ecu_balances,
+        "coalition_history": item_coalition.to_dict() if item_coalition else {},
         "log": [o.to_dict() for o in hub.log],
+        "peer_review_log": [p.to_dict() for p in hub.peer_review_log],
     }
     all_results.append(result)
 
-    status_rows.append({
+    status_row: dict = {
         "Item": item_id,
         "Converged": "✅" if hub.converged else "⏹",
         "Turns": hub.num_submissions,
         "Time (s)": f"{elapsed:.1f}",
-    })
+    }
+    if hub.ecu_balances:
+        for name, bal in hub.ecu_balances.items():
+            status_row[f"ECU {name}"] = f"{bal:.2f}"
+    status_rows.append(status_row)
 
     # Update progress
     progress = (item_idx + 1) / len(subset)

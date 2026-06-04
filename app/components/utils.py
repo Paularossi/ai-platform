@@ -21,10 +21,10 @@ def restore_draft(loaded: dict) -> None:
     st.session_state.task_category = task.get("category", "")
     st.session_state.modalities = task.get("modalities", [])
     st.session_state.task_description = task.get("description", "")
+    st.session_state.task_mode = task.get("mode", "deliberation")
 
     schemas = loaded.get("schemas", {})
     st.session_state.input_fields = schemas.get("input_fields", [])
-    st.session_state.output_fields = schemas.get("output_fields", [])
 
     st.session_state.question_sets = loaded.get("questions", [])
 

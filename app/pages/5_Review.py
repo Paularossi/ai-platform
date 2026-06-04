@@ -68,10 +68,10 @@ def build_draft() -> dict:
             "category": st.session_state.get("task_category", ""),
             "modalities": st.session_state.get("modalities", []),
             "description": st.session_state.get("task_description", ""),
+            "mode": st.session_state.get("task_mode", "deliberation"),
         }),
         "schemas": cfg.get("schemas", {
             "input_fields": st.session_state.get("input_fields", []),
-            "output_fields": st.session_state.get("output_fields", []),
         }),
         "questions": cfg.get("questions", st.session_state.get("question_sets", [])),
         "instructions": cfg.get("instructions", {
@@ -96,19 +96,18 @@ def build_draft() -> dict:
 def readiness_checks(draft: dict) -> tuple[list[str], list[str]]:
     """Return (warnings, errors) based on the draft content."""
     warnings, errors = [], []
+    task_mode = draft["task"].get("mode", "deliberation")
 
     if not draft["overview"].get("name"):
         warnings.append("Experiment name is not set.")
     if not draft["task"].get("description"):
         warnings.append("Task description is empty.")
     if not draft["schemas"].get("input_fields"):
-        errors.append("No input fields defined (Step 1).")
-    if not draft["schemas"].get("output_fields"):
-        errors.append("No output fields defined (Step 1).")
+        warnings.append("No input fields defined (Step 1).")
     if not draft["agents"]:
         errors.append("No agents configured (Step 2).")
-    if not draft["questions"]:
-        warnings.append("No questions loaded (Step 3). Agents will have no structured output to fill in.")
+    if task_mode == "classification" and not draft["questions"]:
+        warnings.append("Classification task with no questions loaded (Step 3).")
     if not draft["instructions"].get("base_instructions"):
         warnings.append("Base instructions are empty (Step 3).")
     if not draft["dataset"].get("filename"):
@@ -154,25 +153,19 @@ with main_col:
     with st.container(border=True):
         st.subheader("2. Task")
         task = draft["task"]
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         c1.markdown(f"**Category**  \n{val(task.get('category'))}")
-        c2.markdown(f"**Modalities**  \n{val(task.get('modalities'))}")
+        c2.markdown(f"**Mode**  \n{val(task.get('mode', 'deliberation'))}")
+        c3.markdown(f"**Modalities**  \n{val(task.get('modalities'))}")
         st.markdown(f"**Description**  \n{val(task.get('description'))}")
 
         schemas = draft["schemas"]
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**Input fields**")
-            for f in schemas.get("input_fields", []):
+        st.markdown("**Input fields**")
+        if schemas.get("input_fields"):
+            for f in schemas["input_fields"]:
                 st.markdown(f"- `{f['name']}` ({f['type']})")
-            if not schemas.get("input_fields"):
-                st.markdown("_None defined_")
-        with c2:
-            st.markdown("**Output fields**")
-            for f in schemas.get("output_fields", []):
-                st.markdown(f"- `{f['name']}` ({f['type']})")
-            if not schemas.get("output_fields"):
-                st.markdown("_None defined_")
+        else:
+            st.markdown("_None defined_")
 
     # ── 3. Protocol & agents ──────────────────────────────────────────────────
     with st.container(border=True):
@@ -203,7 +196,10 @@ with main_col:
                 with cols[i % 3]:
                     with st.container(border=True):
                         st.markdown(f"**{agent.get('name', f'Agent {i+1}')}**")
-                        st.caption(agent.get("role", "-"))
+                        raw_role = agent.get("role", "—")
+                        custom_role_text = agent.get("custom_role", "").strip()
+                        display_role = custom_role_text if raw_role == "Custom" and custom_role_text else raw_role
+                        st.caption(display_role)
                         st.markdown(f"`{agent.get('provider', '?')}` / `{agent.get('model', '?')}`")
                         override = draft["agent_prompt_overrides"].get(agent.get("name", ""), "")
                         if override.strip():
@@ -213,36 +209,36 @@ with main_col:
 
     # ── 4. Instructions & questions ───────────────────────────────────────────
     with st.container(border=True):
-        st.subheader("4. Instructions & questions")
+        task_mode = draft["task"].get("mode", "deliberation")
+        label = "4. Instructions & questions" if task_mode == "classification" else "4. Instructions"
+        st.subheader(label)
 
         instructions = draft["instructions"]
         base = instructions.get("base_instructions", "").strip()
         notes = instructions.get("guideline_notes", "").strip()
         questions = draft["questions"]
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Base instructions", "✅ Set" if base else "-")
-        c2.metric("Guideline notes", "✅ Set" if notes else "-")
-        c3.metric("Questions loaded", len(questions))
+        c1, c2 = st.columns(2)
+        c1.metric("Base instructions", "✅ Set" if base else "—")
+        c2.metric("Guideline notes", "✅ Set" if notes else "—")
 
-        if questions:
-            st.divider()
-            for q in questions:
-                field_type = q.get("field_type", "")
-                badge = {
-                    "single_label": "🔘",
-                    "multi_label": "☑️",
-                    "boolean": "✅",
-                    "score": "📊",
-                    "text": "📝",
-                    "ranking": "🔢",
-                }.get(field_type, "•")
-                n_opts = len(q.get("options", []))
-                st.markdown(
-                    f"{badge} `{q.get('field_name', '?')}` - "
-                    f"{field_type.replace('_', '-')} - "
-                    f"{n_opts} option(s)"
-                )
+        if task_mode == "classification":
+            st.metric("Questions loaded", len(questions))
+            if questions:
+                st.divider()
+                BADGE = {"single_label": "🔘", "multi_label": "☑️", "boolean": "✅",
+                         "score": "📊", "text": "📝", "ranking": "🔢"}
+                for q in questions:
+                    ftype = q.get("field_type", "")
+                    badge = BADGE.get(ftype, "•")
+                    n_opts = len(q.get("options", []))
+                    st.markdown(
+                        f"{badge} `{q.get('field_name', '?')}` — "
+                        f"{ftype.replace('_', '-')} — "
+                        f"{n_opts} option(s)"
+                    )
+        else:
+            st.caption("Deliberation task — agents produce free-text contributions. No questions required.")
 
     # ── 5. Dataset ────────────────────────────────────────────────────────────
     with st.container(border=True):
@@ -291,13 +287,14 @@ with action_col:
     # ── Readiness checklist ───────────────────────────────────────────────────
     with st.container(border=True):
         st.subheader("Readiness")
+        task_mode_check = draft["task"].get("mode", "deliberation")
         check("Experiment name set", bool(draft["overview"].get("name")))
         check("Input fields defined", bool(draft["schemas"].get("input_fields")))
-        check("Output fields defined", bool(draft["schemas"].get("output_fields")))
         check("Agents configured", bool(draft["agents"]))
         check("Protocol configured", bool(draft["protocol"]))
         check("Instructions set", bool(draft["instructions"].get("base_instructions", "").strip()))
-        check("Questions loaded", bool(draft["questions"]))
+        if task_mode_check == "classification":
+            check("Questions loaded", bool(draft["questions"]))
         check("Dataset uploaded", bool(draft["dataset"].get("filename")))
 
     # ── Save draft ────────────────────────────────────────────────────────────

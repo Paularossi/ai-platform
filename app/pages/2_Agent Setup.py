@@ -15,9 +15,9 @@ def init_agent_config():
 
     if "protocol" not in st.session_state.experiment_config:
         st.session_state.experiment_config["protocol"] = {
-            "setting": "Gossip (sequential)",
+            "setting": "Crowd (parallel)",
             "supervision_mode": "Unsupervised",
-            "visibility_mode": "Current state only",
+            "visibility_mode": "Summary only",
             "order_type": "Fixed",
             "initializer_agent": "Agent 1",
             "judge_agent": "Agent 3",
@@ -73,13 +73,13 @@ def init_agent_state():
             ]
 
     if "interaction_setting" not in st.session_state:
-        st.session_state.interaction_setting = protocol.get("setting", "Gossip (sequential)")
+        st.session_state.interaction_setting = protocol.get("setting", "Crowd (parallel)")
 
     if "supervision_mode" not in st.session_state:
         st.session_state.supervision_mode = protocol.get("supervision_mode", "Unsupervised")
 
     if "visibility_mode" not in st.session_state:
-        st.session_state.visibility_mode = protocol.get("visibility_mode", "Current state only")
+        st.session_state.visibility_mode = protocol.get("visibility_mode", "Summary only")
 
     if "order_type" not in st.session_state:
         st.session_state.order_type = protocol.get("order_type", "Fixed")
@@ -290,7 +290,104 @@ with main_col:
                 index=stopping_options.index(st.session_state.stopping_rule),
             )
 
-        st.info("Next: define evaluation rules and run settings →")
+        st.info("Next: define agent instructions →")
+
+    with st.container(border=True):
+        st.subheader("5. ECU quality dimensions")
+        st.caption(
+            "Define the quality dimensions used to score each agent contribution "
+            "and set their initial weights (the weight vector **w**). "
+            "The ecu payout per turn is the weighted sum of dimension scores."
+        )
+
+        # Load defaults from ecu module
+        import sys
+        from pathlib import Path
+        _ROOT = Path(__file__).resolve().parents[2]
+        if str(_ROOT) not in sys.path:
+            sys.path.insert(0, str(_ROOT))
+        from core.ecu import DEFAULT_DIMENSIONS
+
+        if "ecu_dimensions" not in st.session_state:
+            saved = st.session_state.experiment_config.get("ecu", {})
+            if saved.get("dimensions"):
+                st.session_state.ecu_dimensions = saved["dimensions"]
+            else:
+                st.session_state.ecu_dimensions = [
+                    {"name": d["name"], "label": d["label"], "weight": 1.0}
+                    for d in DEFAULT_DIMENSIONS
+                ]
+        if "ecu_enabled" not in st.session_state:
+            st.session_state.ecu_enabled = st.session_state.experiment_config.get("ecu", {}).get("enabled", False)
+        if "ecu_info_condition" not in st.session_state:
+            st.session_state.ecu_info_condition = st.session_state.experiment_config.get("ecu", {}).get("info_condition", "opaque")
+        if "ecu_self_assessment" not in st.session_state:
+            st.session_state.ecu_self_assessment = st.session_state.experiment_config.get("ecu", {}).get("include_self_assessment", False)
+        if "ecu_coalition_threshold" not in st.session_state:
+            st.session_state.ecu_coalition_threshold = float(st.session_state.experiment_config.get("ecu", {}).get("coalition_threshold", 0.6))
+
+        st.session_state.ecu_enabled = st.toggle(
+            "Enable ECU scoring",
+            value=st.session_state.ecu_enabled,
+            help="When enabled, agents score each other after each round and ECU balances are updated.",
+        )
+
+        if st.session_state.ecu_enabled:
+            c1, c2 = st.columns(2)
+            with c1:
+                info_options = ["opaque", "semi-transparent", "transparent"]
+                st.session_state.ecu_info_condition = st.selectbox(
+                    "Information condition",
+                    info_options,
+                    index=info_options.index(st.session_state.ecu_info_condition),
+                    help=(
+                        "Transparent: agents see full weights + all balances.  \n"
+                        "Semi-transparent: agents see noisy weights + own balance only.  \n"
+                        "Opaque: agents see only their own total balance."
+                    ),
+                )
+            with c2:
+                st.session_state.ecu_coalition_threshold = st.number_input(
+                    "Coalition threshold τ",
+                    min_value=0.0, max_value=1.0,
+                    value=st.session_state.ecu_coalition_threshold,
+                    step=0.05,
+                    help="Minimum mutual agreement score for two agents to be in the same coalition.",
+                )
+
+            st.session_state.ecu_self_assessment = st.toggle(
+                "Include self-assessment",
+                value=st.session_state.ecu_self_assessment,
+                help="Agents also score themselves. Self-score contributes with weight λ=0.5.",
+            )
+
+            st.markdown("**Dimensions and weights**")
+            dims = st.session_state.ecu_dimensions
+            for i, dim in enumerate(dims):
+                c1, c2 = st.columns([2, 1])
+                with c1:
+                    st.markdown(f"**{dim['label']}** (`{dim['name']}`)")
+                with c2:
+                    dim["weight"] = st.number_input(
+                        "Weight",
+                        min_value=0.0, max_value=10.0,
+                        value=float(dim.get("weight", 1.0)),
+                        step=0.1,
+                        key=f"ecu_w_{dim['name']}",
+                        label_visibility="collapsed",
+                    )
+
+            total_w = sum(d["weight"] for d in dims)
+            st.caption(f"Total weight: {total_w:.1f}")
+
+        # Persist to experiment_config
+        st.session_state.experiment_config["ecu"] = {
+            "enabled": st.session_state.ecu_enabled,
+            "info_condition": st.session_state.get("ecu_info_condition", "opaque"),
+            "include_self_assessment": st.session_state.get("ecu_self_assessment", False),
+            "coalition_threshold": st.session_state.get("ecu_coalition_threshold", 0.6),
+            "dimensions": st.session_state.ecu_dimensions,
+        }
 
     nav1, nav2, nav3 = st.columns([2, 2, 0.8])
     with nav1:
@@ -338,4 +435,3 @@ with summary_col:
 - stopping rules define when the protocol ends
 """
         )
-

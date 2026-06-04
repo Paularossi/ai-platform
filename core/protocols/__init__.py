@@ -21,12 +21,13 @@ class RunEvent:
     """
     A single step event emitted by any protocol's run_iter() generator.
 
-    kind == "dispatch"   : hub has built a context packet and is about to
-                           call the agent. packet is set, output is None.
-    kind == "submission" : agent has returned its output and the hub has stored it.
-                           output is set, packet is the one that was sent.
+    kind == "dispatch"     : hub built a context packet, about to call agent
+    kind == "submission"   : agent returned output, hub stored it
+    kind == "aggregate"    : crowd round aggregate computed
+    kind == "peer_review"  : one agent's Phase 2 peer review completed
+    kind == "ecu_update"   : ECU ledger updated after a full peer review round
     """
-    kind: Literal["dispatch", "submission", "aggregate"]
+    kind: Literal["dispatch", "submission", "aggregate", "peer_review", "ecu_update"]
     cycle: int
     agent_name: str
     packet: ContextPacket

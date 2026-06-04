@@ -1,109 +1,57 @@
-"""Welcome page for setting up a new experiment in the Multi-Agent Platform app."""
+"""Step 1 — Task definition."""
 
 import streamlit as st
-import json
-from components.utils import output_fields_from_question_sets
 
 st.set_page_config(page_title="Multi-Agent Platform", page_icon="🧠", layout="wide")
 
 
 # ---------- helpers ----------
-def default_input_field():
-    return {"name": "", "type": "Text"}
-
-
-def default_output_field():
-    return {"name": "", "type": "Single-label"}
-
-
-def init_state():
-    if "input_fields" not in st.session_state:
-        st.session_state.input_fields = [
-            {"name": "image", "type": "Image"},
-            {"name": "caption", "type": "Text"},
-        ]
-        
-    if "output_fields" not in st.session_state:
-        st.session_state.output_fields = [
-            {"name": "label", "type": "Single-label"},
-            {"name": "multi_label", "type": "Multi-label"},
-            {"name": "confidence", "type": "Score"},
-            {"name": "rationale", "type": "Text"},
-        ]
-
-    if "question_sets" not in st.session_state:
-        st.session_state.question_sets = []
-
-    if "base_instructions" not in st.session_state:
-        st.session_state.base_instructions = ""
-
-    if "exp_name" not in st.session_state:
-        st.session_state.exp_name = st.session_state.experiment_config["overview"]["name"]
-
-    if "author" not in st.session_state:
-        st.session_state.author = st.session_state.experiment_config["overview"]["author"]
-
-    if "protocol_id" not in st.session_state:
-        st.session_state.protocol_id = st.session_state.experiment_config["overview"]["protocol_id"]
-
-    if "task_category" not in st.session_state:
-        st.session_state.task_category = st.session_state.experiment_config["task"]["category"]
-
-    if "modalities" not in st.session_state:
-        st.session_state.modalities = st.session_state.experiment_config["task"]["modalities"]
-
-    if "task_description" not in st.session_state:
-        st.session_state.task_description = st.session_state.experiment_config["task"]["description"]
-
-
 def init_experiment_config():
     if "experiment_config" not in st.session_state:
         st.session_state.experiment_config = {
-            "overview": {
-                "name": "",
-                "author": "",
-                "protocol_id": "",
-            },
-            "task": {
-                "category": "Classification / annotation",
-                "modalities": ["Image", "Text"],
-                "description": "",
-            },
-            "schemas": {
-                "input_fields": [],
-                "output_fields": [],
-            },
+            "overview": {"name": "", "author": "", "protocol_id": ""},
+            "task": {"category": "Deliberation", "modalities": ["Text"], "description": "", "mode": "deliberation"},
+            "schemas": {"input_fields": []},
             "questions": [],
-            "instructions": {
-                "base_instructions": "",
-                "guideline_notes": "",
-            },
+            "instructions": {"base_instructions": "", "guideline_notes": ""},
         }
 
 
-def sync_welcome_to_config():
+def init_state():
+    cfg = st.session_state.experiment_config
+
+    if "exp_name" not in st.session_state:
+        st.session_state.exp_name = cfg["overview"]["name"]
+    if "author" not in st.session_state:
+        st.session_state.author = cfg["overview"]["author"]
+    if "protocol_id" not in st.session_state:
+        st.session_state.protocol_id = cfg["overview"]["protocol_id"]
+    if "task_category" not in st.session_state:
+        st.session_state.task_category = cfg["task"]["category"]
+    if "modalities" not in st.session_state:
+        st.session_state.modalities = cfg["task"]["modalities"]
+    if "task_description" not in st.session_state:
+        st.session_state.task_description = cfg["task"]["description"]
+    if "task_mode" not in st.session_state:
+        st.session_state.task_mode = cfg["task"].get("mode", "deliberation")
+    if "input_fields" not in st.session_state:
+        st.session_state.input_fields = cfg["schemas"].get("input_fields", [])
+
+
+def sync_to_config():
     st.session_state.experiment_config["overview"] = {
         "name": st.session_state.get("exp_name", ""),
         "author": st.session_state.get("author", ""),
         "protocol_id": st.session_state.get("protocol_id", ""),
     }
-
     st.session_state.experiment_config["task"] = {
-        "category": st.session_state.get("task_category", "Classification / annotation"),
-        "modalities": st.session_state.get("modalities", ["Image", "Text"]),
+        "category": st.session_state.get("task_category", "Deliberation"),
+        "modalities": st.session_state.get("modalities", ["Text"]),
         "description": st.session_state.get("task_description", ""),
+        "mode": st.session_state.get("task_mode", "deliberation"),
     }
-
     st.session_state.experiment_config["schemas"] = {
         "input_fields": st.session_state.get("input_fields", []),
-        "output_fields": st.session_state.get("output_fields", []),
-    }
-
-    st.session_state.experiment_config["questions"] = st.session_state.get("question_sets", [])
-
-    st.session_state.experiment_config["instructions"] = {
-        "base_instructions": st.session_state.get("base_instructions", ""),
-        "guideline_notes": st.session_state.get("guideline_notes", ""),
     }
 
 
@@ -114,186 +62,159 @@ init_state()
 st.sidebar.title("Experiment Builder")
 st.sidebar.caption("Step 1 of 5")
 st.sidebar.progress(1 / 5)
-st.sidebar.markdown(
-    """
+st.sidebar.markdown("""
 **Steps**
 1. Task
 2. Agents
 3. Instructions
 4. Dataset
 5. Review
-"""
-)
+""")
 
+st.title("Task Definition")
+st.caption("Define what the experiment is about and what agents receive as input.")
 
-# ---------- header ----------
-st.title("Create Experiment")
-st.caption("Define a reusable task setup for multi-agent workflows.")
-
-
-# ---------- layout ----------
 main_col, summary_col = st.columns([2.1, 1], gap="large")
 
 with main_col:
-    with st.container(border=True):
-        st.subheader("1. Experiment overview")
-        exp_name = st.text_input("Experiment name", placeholder="e.g. Gossip pilot for multimodal ad annotation", key="exp_name")
 
+    # ── Overview ──────────────────────────────────────────────────────────────
+    with st.container(border=True):
+        st.subheader("1. Overview")
+        st.text_input(
+            "Experiment name",
+            placeholder="e.g. Gossip pilot — Italy description task",
+            key="exp_name",
+        )
         c1, c2 = st.columns(2)
         with c1:
-            author = st.text_input("Author", placeholder="e.g. Paula / Freija", key="author")
+            st.text_input("Author", placeholder="e.g. Paula / Freija", key="author")
         with c2:
-            protocol_id = st.text_input("Protocol version", placeholder="e.g. v0.1", key="protocol_id")
+            st.text_input("Protocol version", placeholder="e.g. v0.1", key="protocol_id")
 
+    # ── Task specification ────────────────────────────────────────────────────
     with st.container(border=True):
         st.subheader("2. Task specification")
 
         c1, c2 = st.columns(2)
         with c1:
-            task_category = st.selectbox(
+            st.selectbox(
                 "Task category",
                 [
+                    "Deliberation",
                     "Classification / annotation",
                     "Extraction",
                     "Summarization",
                     "Evaluation / judging",
                     "Generation",
                     "Comparison / ranking",
-                    "Review / revision",
                     "Custom",
-                ], key="task_category"
+                ],
+                key="task_category",
             )
         with c2:
-            modalities = st.multiselect(
+            st.multiselect(
                 "Modality",
-                ["Text", "Image", "Audio", "Video", "Tabular / structured data", "Multimodal"],
-                default=["Image", "Text"], key="modalities"
+                ["Text", "Image", "Audio", "Video", "Tabular / structured data"],
+                default=st.session_state.modalities,
+                key="modalities",
             )
 
-        task_description = st.text_area(
+        st.text_area(
             "Task description",
-            placeholder="Describe the task in natural language.",
-            height=120, key="task_description"
+            placeholder=(
+                "Describe the task in natural language. This is shown to you as reference "
+                "— the actual instructions sent to agents are set in Step 3.\n\n"
+                "E.g.: Agents are given a country name and must produce a one-sentence "
+                "description. They interact over multiple rounds to reach a shared description."
+            ),
+            height=130,
+            key="task_description",
         )
 
+        # Task mode — determines how agent.py builds prompts and parses outputs
+        mode_options = ["deliberation", "classification"]
+        mode_labels = {
+            "deliberation": "Deliberation — agents produce free-text contributions",
+            "classification": "Classification — agents answer structured questions with option codes",
+        }
+        current_mode = st.session_state.get("task_mode", "deliberation")
+        selected_mode = st.radio(
+            "Task mode",
+            mode_options,
+            format_func=lambda m: mode_labels[m],
+            index=mode_options.index(current_mode),
+            key="task_mode",
+            help=(
+                "Deliberation: agents write free-text statements (e.g. describe Italy). "
+                "Classification: agents choose from predefined option codes (e.g. target_age: ADULT)."
+            ),
+        )
+
+        if selected_mode == "classification":
+            st.info(
+                "In Step 3 you will upload a question set JSON defining the fields and option codes.",
+                icon="ℹ️",
+            )
+
+    # ── Input schema ──────────────────────────────────────────────────────────
     with st.container(border=True):
         st.subheader("3. Input schema")
-        st.caption("Define what each task item contains.")
+        st.caption(
+            "Define what each item in your dataset contains. "
+            "These fields are used to build the context shown to agents."
+        )
+
+        input_type_options = ["Text", "Long text", "Image", "Audio", "Video", "JSON", "Numeric", "Category"]
 
         for i, field in enumerate(st.session_state.input_fields):
-            cols = st.columns([1.4, 1, 0.5])
+            cols = st.columns([1.4, 1, 0.4])
             with cols[0]:
-                field["name"] = st.text_input("Field name", value=field["name"], key=f"in_name_{i}")
+                field["name"] = st.text_input(
+                    "Field name", value=field["name"], key=f"in_name_{i}",
+                    placeholder="e.g. country, caption, image"
+                )
             with cols[1]:
+                idx = input_type_options.index(field["type"]) if field["type"] in input_type_options else 0
                 field["type"] = st.selectbox(
-                    "Type",
-                    ["Text", "Long text", "Image", "Audio", "Video", "JSON", "Numeric", "Category"],
-                    index=["Text", "Long text", "Image", "Audio", "Video", "JSON", "Numeric", "Category"].index(field["type"]),
-                    key=f"in_type_{i}",
+                    "Type", input_type_options, index=idx, key=f"in_type_{i}"
                 )
             with cols[2]:
                 st.write("")
                 st.write("")
-                if st.button("✕", key=f"remove_input_{i}"):
+                if st.button("✕", key=f"rm_in_{i}"):
                     st.session_state.input_fields.pop(i)
                     st.rerun()
 
         if st.button("+ Add input field"):
-            st.session_state.input_fields.append(default_input_field())
+            st.session_state.input_fields.append({"name": "", "type": "Text"})
             st.rerun()
 
-    with st.container(border=True):
-        st.subheader("4. Output schema")
-        st.caption("Define what the agents should return.")
+    st.info("Next: configure agents and interaction protocol →")
 
-        uploaded_questions = st.file_uploader(
-            "Upload question set JSON",
-            type=["json"],
-            help="Upload structured label definitions and automatically update the output schema.",
-            key="question_set_uploader",
-        )
-
-        if uploaded_questions is not None:
-            if st.button("Load questions from file"):
-                try:
-                    data = json.load(uploaded_questions)
-
-                    if not isinstance(data, dict) or "questions" not in data or not isinstance(data["questions"], list):
-                        st.error("Invalid JSON format. Expected a top-level 'questions' list.")
-                    else:
-                        st.session_state.question_sets = data["questions"]
-                        st.session_state.output_fields = output_fields_from_question_sets(data["questions"])
-                        st.success("Question sets loaded and output schema updated.")
-
-                except Exception as e:
-                    st.error(f"Failed to load JSON: {e}")
-
-
-        for i, field in enumerate(st.session_state.output_fields):
-            cols = st.columns([1.4, 1, 0.5])
-            with cols[0]:
-                field["name"] = st.text_input("Field name", value=field["name"], key=f"out_name_{i}")
-            with cols[1]:
-                output_type_options = ["Single-label", "Multi-label", "Score", "Text", "Boolean", "Ranking"]
-                field_type = field["type"] if field["type"] in output_type_options else "Single-label"
-
-                field["type"] = st.selectbox(
-                    "Type",
-                    output_type_options,
-                    index=output_type_options.index(field_type),
-                    key=f"out_type_{i}",
-                )
-            with cols[2]:
-                st.write("")
-                st.write("")
-                if st.button("✕", key=f"remove_output_{i}"):
-                    st.session_state.output_fields.pop(i)
-                    st.rerun()
-
-        add_col, clear_col, _ = st.columns([3, 3, 2])
-
-        with add_col:
-            if st.button("+ Add output field"):
-                st.session_state.output_fields.append(default_output_field())
-                st.rerun()
-
-        with clear_col:
-            if st.button("Clear all output fields", type="secondary"):
-                st.session_state.output_fields = []
-                st.rerun()
-
-    st.info("Next: Configure agents and interaction protocol ->")
-
-    nav1, nav2, nav3 = st.columns([2, 2, 5])
+    nav1, nav2, _ = st.columns([2, 2, 4])
     with nav1:
         if st.button("Save draft"):
-            sync_welcome_to_config()
+            sync_to_config()
             st.switch_page("pages/5_Review.py")
     with nav2:
-        if st.button("Next ->"):
-            sync_welcome_to_config()
+        if st.button("Next →"):
+            sync_to_config()
             st.switch_page("pages/2_Agent Setup.py")
+
 
 with summary_col:
     with st.container(border=True):
         st.subheader("Live summary")
-        st.markdown(f"**Name**  \n{exp_name or '-'}")
-        st.markdown(f"**Task category**  \n{task_category}")
-        st.markdown(f"**Modality**  \n{', '.join(modalities) if modalities else '-'}")
-        st.markdown(f"**Author**  \n{author or '-'}")
-        st.markdown(f"**Protocol**  \n{protocol_id or '-'}")
-
+        st.markdown(f"**Name**  \n{st.session_state.get('exp_name') or '—'}")
+        st.markdown(f"**Author**  \n{st.session_state.get('author') or '—'}")
+        st.markdown(f"**Category**  \n{st.session_state.get('task_category', '—')}")
+        st.markdown(f"**Mode**  \n{st.session_state.get('task_mode', '—')}")
+        st.markdown(f"**Modality**  \n{', '.join(st.session_state.get('modalities', [])) or '—'}")
         st.divider()
         st.markdown("**Task description**")
-        st.write(task_description or "-")
-
+        st.write(st.session_state.get("task_description") or "—")
         st.divider()
         st.markdown("**Input fields**")
-        for field in st.session_state.input_fields:
-            st.markdown(f"- `{field['name'] or 'unnamed'}` ({field['type']})")
-
-        st.markdown("**Output fields**")
-        current_output_fields = st.session_state.get("output_fields", [])
-
-        for field in current_output_fields:
-            st.markdown(f"- `{field['name'] or 'unnamed'}` ({field['type']})")
+        for f in st.session_state.get("input_fields", []):
+            st.markdown(f"- `{f['name'] or 'unnamed'}` ({f['type']})")

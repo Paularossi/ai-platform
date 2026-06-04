@@ -51,10 +51,14 @@ class CrowdProtocol:
         self,
         agents: list[Agent],
         experiment_config: dict[str, Any],
+        peer_reviewer: Any | None = None,
+        coalition_tracker: Any | None = None,
         dry_run: bool = False,
     ):
         self.agents = agents
         self.dry_run = dry_run
+        self.peer_reviewer = peer_reviewer
+        self.coalition_tracker = coalition_tracker
 
         protocol = experiment_config.get("protocol", {})
         self.max_cycles: int = int(protocol.get("max_cycles", 5))
@@ -112,29 +116,99 @@ class CrowdProtocol:
                     output=output,
                 )
 
-            # Step 3 & 4: aggregate and push to hub
-            aggregate_labels, vote_distribution = _majority_vote(
-                round_outputs, hub.current_labels
+            # Step 3: aggregate (classification only) or just record round end
+            is_classification = any(
+                isinstance(o.contribution, dict) for o in round_outputs if o.contribution
             )
-            hub.set_current_labels(aggregate_labels)
+            if is_classification:
+                aggregate_labels, vote_distribution = _majority_vote(
+                    round_outputs, hub.current_labels
+                )
+                hub.set_current_labels(aggregate_labels)
+                aggregate_output = AgentOutput(
+                    agent_name="__aggregate__",
+                    cycle=cycle_idx,
+                    contribution=aggregate_labels,
+                    prob_distribution=vote_distribution,
+                )
+                yield RunEvent(
+                    kind="aggregate",
+                    cycle=cycle_idx,
+                    agent_name="__aggregate__",
+                    packet=packets[0][1],
+                    output=aggregate_output,
+                )
 
-            # Carry vote distribution as probabilities so the UI can display it
-            aggregate_output = AgentOutput(
-                agent_name="__aggregate__",
-                cycle=cycle_idx,
-                labels=aggregate_labels,
-                probabilities=vote_distribution,
-            )
+            # ── Phase 2: peer review (if configured) ────────────────────
+            if self.peer_reviewer:
+                all_contributions = {
+                    o.agent_name: o.contribution
+                    for o in round_outputs
+                }
+                item_context = ", ".join(
+                    f"{k}: {v}" for k, v in hub.item_data.items()
+                    if k.lower() not in ("image", "image_url", "image_path")
+                )
+                ecu_info = hub.ecu_info_str(cycle_idx)
 
-            yield RunEvent(
-                kind="aggregate",
-                cycle=cycle_idx,
-                agent_name="__aggregate__",
-                packet=packets[0][1],  # representative packet (item context)
-                output=aggregate_output,
-            )
+                for agent in self.agents:
+                    if self.peer_reviewer.dry_run:
+                        review = self.peer_reviewer.parse(
+                            reviewer_name=agent.name,
+                            cycle=cycle_idx,
+                            raw="[dry-run]",
+                            all_contributions=all_contributions,
+                        )
+                    else:
+                        prompt = self.peer_reviewer.build_prompt(
+                            reviewer_name=agent.name,
+                            reviewer_contribution=all_contributions.get(agent.name, ""),
+                            all_contributions=all_contributions,
+                            cycle=cycle_idx,
+                            item_context=item_context,
+                            ecu_info=ecu_info,
+                        )
+                        try:
+                            from openai import OpenAI
+                            client = OpenAI()
+                            response = client.chat.completions.create(
+                                model=agent.model,
+                                messages=[{"role": "user", "content": prompt}],
+                                temperature=0.0,
+                                max_tokens=800,
+                            )
+                            raw = response.choices[0].message.content or "{}"
+                        except Exception as exc:
+                            raw = f"[ERROR: {exc}]"
+                        review = self.peer_reviewer.parse(
+                            reviewer_name=agent.name,
+                            cycle=cycle_idx,
+                            raw=raw,
+                            all_contributions=all_contributions,
+                        )
 
-            # Step 5: check stopping rule
+                    hub.submit_peer_review(review)
+                    yield RunEvent(
+                        kind="peer_review",
+                        cycle=cycle_idx,
+                        agent_name=agent.name,
+                        packet=packets[0][1],
+                    )
+
+                if hub.ledger:
+                    hub.compute_ecus_for_round(cycle_idx)
+                    yield RunEvent(
+                        kind="ecu_update",
+                        cycle=cycle_idx,
+                        agent_name="__all__",
+                        packet=packets[0][1],
+                    )
+
+                if self.coalition_tracker:
+                    round_reviews = [r for r in hub.peer_review_log if r.cycle == cycle_idx]
+                    self.coalition_tracker.find_coalition(round_reviews)
+
+            # ── Stopping rule ────────────────────────────────────────────
             if self.stopping_rule in ("Convergence", "Either"):
                 if hub.check_convergence():
                     return
@@ -155,21 +229,14 @@ def _majority_vote(
 ) -> tuple[dict[str, Any], dict[str, dict[str, float]]]:
     """
     Aggregate AgentOutputs into a single label set by majority vote.
-
-    Returns
-    -------
-    labels : dict
-        Winning label per field. On a tie the previous round's label is kept.
-    vote_distribution : dict
-        {field: {label: fraction}} - fraction of agents that voted for each label.
-        Useful for display and future entropy-based stopping.
+    Works on classification outputs (contribution = dict).
     """
     if not outputs:
         return dict(current_labels), {}
 
     all_fields: set[str] = set()
     for output in outputs:
-        all_fields.update(output.labels.keys())
+        all_fields.update(output.labels.keys())  # .labels is safe — returns {} for non-classification
 
     labels: dict[str, Any] = {}
     vote_distribution: dict[str, dict[str, float]] = {}

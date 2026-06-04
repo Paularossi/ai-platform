@@ -4,11 +4,21 @@ core/agent.py
 Stateless agent wrapper.
 
 The agent receives a ContextPacket from the hub, builds a prompt,
-calls the OpenAI API (gpt-4o for now), parses the structured response,
-and returns an AgentOutput.
+calls the OpenAI API, parses the structured response, and returns
+an AgentOutput.
 
-The agent has no memory between calls - all context comes from the hub
-via the ContextPacket.
+Two task modes are supported, determined by whether the experiment
+config contains structured questions:
+
+  Classification mode  — questions with option codes are present.
+                         Output: contribution = dict[field→verdict],
+                         prob_distribution populated, confidence derived.
+
+  Deliberation mode    — no structured questions (or text-only).
+                         Output: contribution = str (free-text statement),
+                         prob_distribution empty, confidence self-reported.
+
+The agent has no memory between calls — all context comes from the hub.
 """
 
 from __future__ import annotations
@@ -23,19 +33,17 @@ from core.state import AgentOutput
 
 
 # ---------------------------------------------------------------------------
-# Image helpers
+# Image helpers (unchanged — multimodal input still supported)
 # ---------------------------------------------------------------------------
 
 _MIME_MAP = {
     "jpg": "image/jpeg", "jpeg": "image/jpeg",
     "png": "image/png", "webp": "image/webp", "gif": "image/gif",
 }
-
 _IMAGE_KEYS = ("image_path", "image_url", "image")
 
 
 def _image_path_to_data_url(image_path: str) -> str | None:
-    """Load an image from disk and return a base64 data URL, or None on failure."""
     try:
         ext = Path(image_path).suffix.lower().lstrip(".")
         mime = _MIME_MAP.get(ext, "image/png")
@@ -47,36 +55,38 @@ def _image_path_to_data_url(image_path: str) -> str | None:
 
 
 def _resolve_image_url(item_data: dict[str, Any]) -> str | None:
-    """
-    Resolve image input from item data into a URL consumable by OpenAI image_url.
-
-    Accepted sources:
-    - local path in image_path / image
-    - remote URL in image_url / image
-    - data URL in image_url / image
-    """
     for key in _IMAGE_KEYS:
         raw_val = item_data.get(key)
         if not raw_val:
             continue
-
         val = str(raw_val).strip()
         if not val:
             continue
-
-        lowered = val.lower()
-        if lowered.startswith(("http://", "https://", "data:image/")):
+        if val.lower().startswith(("http://", "https://", "data:image/")):
             return val
-
-        # If this looks like a local file path, try encoding to a data URL (supports both explicit image_path and cases where "image" contains a path).
         if Path(val).exists():
-            data_url = _image_path_to_data_url(val)
-            if data_url:
-                return data_url
-
+            return _image_path_to_data_url(val)
     return None
-    
-    
+
+
+# ---------------------------------------------------------------------------
+# Task mode detection
+# ---------------------------------------------------------------------------
+
+def _is_classification_task(questions: list[dict]) -> bool:
+    """
+    True if the task has structured questions with option codes.
+    False for deliberation tasks (no questions, or text/score-only questions).
+    """
+    if not questions:
+        return False
+    choice_types = {"single_label", "multi_label"}
+    return any(
+        q.get("field_type", "single_label") in choice_types
+        for q in questions
+    )
+
+
 # ---------------------------------------------------------------------------
 # Prompt builders
 # ---------------------------------------------------------------------------
@@ -94,7 +104,6 @@ def _build_system_prompt(
     parts.append(f"You are {agent_name}. Your role: {agent_role}.")
     parts.append("")
 
-    # Per-agent override prepended before base instructions
     override = agent_overrides.get(agent_name, "").strip()
     if override:
         parts.append(override)
@@ -109,20 +118,14 @@ def _build_system_prompt(
         parts.append(guideline_notes.strip())
         parts.append("")
 
-    if questions:
+    if _is_classification_task(questions):
+        # ── Classification mode ───────────────────────────────────────────
         parts.append("--- Questions ---")
 
-        # Determine which field types are present so we only mention
-        # probabilities/confidence when there are actually option codes to distribute over.
         choice_types = {"single_label", "multi_label"}
-        has_choice = any(
-            q.get("field_type", "single_label") in choice_types
-            for q in questions
-        )
+        has_choice = any(q.get("field_type", "single_label") in choice_types for q in questions)
+        example_field = questions[0]["field_name"]
 
-        # Use the first real field name as the example so the model doesn't
-        # copy the placeholder literally into its response.
-        example_field = questions[0]["field_name"] if questions else "field_name"
         fmt: list[str] = [
             "For EACH question, respond using this exact block format:",
             "",
@@ -131,8 +134,8 @@ def _build_system_prompt(
         ]
         if has_choice:
             fmt += [
-                "  probabilities: CODE1=0.XX, CODE2=0.XX, ...   (choice fields only — must sum to 1.0)",
-                "  confidence: 0.XX                              (choice fields only)",
+                "  probabilities: CODE1=0.XX, CODE2=0.XX, ...   (must sum to 1.0)",
+                "  confidence: 0.XX",
             ]
         fmt += [
             "",
@@ -143,9 +146,8 @@ def _build_system_prompt(
             "  - <reason against or alternative reading>",
             "",
             "Rules:",
-            "- Use the EXACT field name from each question as the block header — never "
-            "the word FIELD_NAME. "
-            "Expected headers (one per question): "
+            "- Use the EXACT field name from each question as the block header. "
+            "Expected headers: "
             + "  ".join(f"{q['field_name']}:" for q in questions),
             "- For single/multi-label fields: verdict is the option code (e.g. YES, NO)",
             "- For multi-label fields: list all selected codes separated by commas",
@@ -168,14 +170,36 @@ def _build_system_prompt(
             parts.append(f"Q{i}. [{q['field_name']}] {q.get('instruction', '')}")
             for opt in q.get("options", []):
                 parts.append(f"   • {opt['code']}: {opt['description']}")
-            # Add a brief type hint for non-choice fields so the model isn't confused
             if ftype == "boolean":
                 parts.append("   (verdict: true or false)")
             elif ftype == "text":
-                parts.append("   (verdict: free-text answer, no option codes)")
+                parts.append("   (verdict: free-text answer)")
             elif ftype == "score":
                 parts.append("   (verdict: numeric score)")
         parts.append("")
+
+    elif questions:
+        # ── Text/score questions without option codes ─────────────────────
+        # Still structured but no probability distribution needed.
+        parts.append("--- Questions ---")
+        parts.append("Answer each question on its own line:")
+        parts.append("  field_name: your answer")
+        parts.append("")
+        for i, q in enumerate(questions, 1):
+            parts.append(f"Q{i}. [{q['field_name']}] {q.get('instruction', '')}")
+        parts.append("")
+        parts.append("After your answers, add:")
+        parts.append("pros:")
+        parts.append("  - <reason supporting your answers>")
+        parts.append("cons:")
+        parts.append("  - <reason against or alternative reading>")
+        parts.append("")
+
+    else:
+        # ── Deliberation mode — no structured questions ───────────────────
+        # Output format is entirely defined by the user's base_instructions.
+        # We add nothing here — the user decides what structure they want.
+        pass
 
     return "\n".join(parts)
 
@@ -183,126 +207,109 @@ def _build_system_prompt(
 def _build_user_message(packet: ContextPacket, questions: list[dict]) -> str:
     parts: list[str] = []
 
-    # Item data (skip image keys - handled as vision input separately)
-    parts.append("--- Item ---")
+    # ── Item data (from dataset) ──────────────────────────────────────────────
     for key, value in packet.item_data.items():
         if key.lower() in ("image", "image_url", "image_path"):
             continue
         parts.append(f"{key}: {value}")
     parts.append("")
 
-    # Current label state - always shown
-    if packet.current_labels:
-        parts.append("--- Current label state (set so far) ---")
-        for fname, val in packet.current_labels.items():
-            parts.append(f"  {fname}: {val}")
-        parts.append("")
-
-    # History from hub, filtered by visibility_mode
+    # ── Previous round context (from hub, cycle > 0) ──────────────────────────
     if packet.visible_history:
-        if len(packet.visible_history) == 1:
-            prev = packet.visible_history[0]
-            parts.append(f"--- Previous submission (by {prev.agent_name}, cycle {prev.cycle + 1}) ---")
-            for fname, val in prev.labels.items():
-                changed = prev.changed.get(fname, False)
-                prob_str = ""
-                if fname in prev.probabilities:
-                    prob_str = "  probs: " + ", ".join(
-                        f"{k}={v:.2f}" for k, v in prev.probabilities[fname].items()
-                    )
-                parts.append(f"  {fname}: {val}{' [revised]' if changed else ''}{prob_str}")
-            if prev.pros:
-                parts.append("  pros: " + "; ".join(prev.pros))
-            if prev.cons:
-                parts.append("  cons: " + "; ".join(prev.cons))
-        else:
-            parts.append("--- Submission history (from hub) ---")
-            for out in packet.visible_history:
-                parts.append(f"[Cycle {out.cycle + 1} | {out.agent_name}]")
-                for fname, val in out.labels.items():
-                    changed = out.changed.get(fname, False)
-                    prob_str = ""
-                    if fname in out.probabilities:
-                        prob_str = "  probs: " + ", ".join(
-                            f"{k}={v:.2f}" for k, v in out.probabilities[fname].items()
-                        )
-                    parts.append(f"  {fname}: {val}{' [revised]' if changed else ''}{prob_str}")
-                if out.pros:
-                    parts.append("  pros: " + "; ".join(out.pros))
-                if out.cons:
-                    parts.append("  cons: " + "; ".join(out.cons))
+        parts.append("=== Previous round ===")
         parts.append("")
 
-    # Task prompt
-    if packet.cycle > 0 or packet.visible_history:
-        parts.append(
-            f"This is cycle {packet.cycle + 1}. "
-            "Review the current answers and revise any you disagree with, "
-            "or confirm them if you agree. Answer ALL questions."
-        )
-    else:
-        parts.append("Please answer all questions about the item above.")
+        # Group history by agent for clean display
+        by_agent: dict[str, Any] = {}
+        for out in packet.visible_history:
+            by_agent[out.agent_name] = out
+
+        parts.append("Contributions:")
+        for agent_name, out in by_agent.items():
+            if agent_name == packet.agent_name:
+                label = f"{agent_name} (your previous contribution)"
+            else:
+                label = agent_name
+            contrib = str(out.contribution) if out.contribution else "(none)"
+            parts.append(f"  [{label}]: {contrib}")
+        parts.append("")
+
+        # Show peer review scores if available
+        scores_shown = False
+        for out in packet.visible_history:
+            if out.ecu_scores:
+                if not scores_shown:
+                    parts.append("Peer review scores (average received):")
+                    scores_shown = True
+                score_str = ", ".join(f"{d}: {s:.2f}" for d, s in out.ecu_scores.items())
+                ecu_str = f"  [{out.ecu_earned:.2f} ecus]" if out.ecu_earned is not None else ""
+                parts.append(f"  {out.agent_name}: {score_str}{ecu_str}")
+        if scores_shown:
+            parts.append("")
+
+        # Show ECU balances if available (transparent condition)
+        if packet.ecu_balances:
+            bal_str = ", ".join(f"{k}: {v:.2f}" for k, v in packet.ecu_balances.items())
+            parts.append(f"Current ECU balances: {bal_str}")
+            parts.append("")
+
+        parts.append("=== Your turn ===")
+        parts.append("")
 
     return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
-# Output parser
+# Output parsers
 # ---------------------------------------------------------------------------
 
-def _parse_output(
+def _parse_contribution(
     raw_text: str,
     questions: list[dict],
-) -> tuple[dict, dict, dict, list[str], list[str]]:
+) -> tuple[Any, dict, float | None, list[str], list[str]]:
     """
-    Parse raw LLM text into (labels, probabilities, confidence, pros, cons).
+    Parse raw LLM text into (contribution, prob_distribution, confidence, pros, cons).
 
-    Expected block format per field:
-        FIELD_NAME:
-          verdict: CODE
-          probabilities: CODE1=0.70, CODE2=0.20, CODE3=0.10
-          confidence: 0.70
+    For classification tasks:
+        contribution    = dict[field_name → verdict]
+        prob_distribution = dict[field_name → {code: float}]
+        confidence      = mean of per-field confidence values (float | None)
 
-    Followed by:
-        pros:
-          - reason one
-          - reason two
-        cons:
-          - reason one
-
-    Also handles the legacy asterisk format for backwards compatibility:
-        *field_name*: CODE | reasoning
+    For deliberation tasks:
+        contribution    = str (the full statement, stripped of pros/cons/confidence)
+        prob_distribution = {}
+        confidence      = float | None (if agent reported one)
     """
+    if _is_classification_task(questions):
+        return _parse_classification(raw_text, questions)
+    else:
+        return _parse_deliberation(raw_text, questions)
+
+
+def _parse_classification(
+    raw_text: str,
+    questions: list[dict],
+) -> tuple[dict, dict, float | None, list[str], list[str]]:
+    """Parse structured classification block format."""
     labels: dict[str, Any] = {}
-    probabilities: dict[str, dict[str, float]] = {}
-    confidence: dict[str, float] = {}
+    prob_distribution: dict[str, dict[str, float]] = {}
+    per_field_confidence: dict[str, float] = {}
     pros: list[str] = []
     cons: list[str] = []
 
     field_types = {q["field_name"]: q["field_type"] for q in questions}
-    field_options = {
-        q["field_name"]: [o["code"] for o in q.get("options", [])]
-        for q in questions
-    }
-
-    # ── Block format parser ───────────────────────────────────────────────────
-    # Split into per-field blocks by looking for lines that start with a known
-    # field name followed by a colon (the block header).
     lines = raw_text.splitlines()
     current_field: str | None = None
     in_pros = False
     in_cons = False
-    # Positional fallback counter: if the model outputs the literal placeholder
-    # "FIELD_NAME:" instead of the real field name, map by occurrence order.
     _placeholder_count = 0
 
     for line in lines:
         stripped = line.strip()
         if not stripped:
             continue
-        
-        # try two different header formats
-        # FIELD_NAME: target_age
+
+        # Alternate header formats
         field_name_match = re.match(r"^field_name\s*:\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*$", stripped, re.IGNORECASE)
         if field_name_match:
             fname = field_name_match.group(1).strip()
@@ -311,7 +318,6 @@ def _parse_output(
                 in_pros, in_cons = False, False
                 continue
 
-        # Q1. [target_age]
         q_header_match = re.match(r"^q\d+\.?\s*\[\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\]\s*$", stripped, re.IGNORECASE)
         if q_header_match:
             fname = q_header_match.group(1).strip()
@@ -320,7 +326,6 @@ def _parse_output(
                 in_pros, in_cons = False, False
                 continue
 
-        # Detect pros/cons section headers
         if stripped.lower().startswith("pros:") or stripped.lower() == "pros":
             in_pros, in_cons, current_field = True, False, None
             continue
@@ -328,23 +333,15 @@ def _parse_output(
             in_cons, in_pros, current_field = True, False, None
             continue
 
-        # Collect pros/cons bullet points
-        if in_pros and stripped.startswith("-"):
-            pros.append(stripped[1:].strip())
-            continue
-        if in_cons and stripped.startswith("-"):
-            cons.append(stripped[1:].strip())
-            continue
-
-        # if there are no bullet markers for the pros/cons lines.
         if in_pros:
-            pros.append(stripped)
+            text = stripped[1:].strip() if stripped.startswith("-") else stripped
+            pros.append(text)
             continue
         if in_cons:
-            cons.append(stripped)
+            text = stripped[1:].strip() if stripped.startswith("-") else stripped
+            cons.append(text)
             continue
 
-        # Detect a field block header: "field_name:" at the start of a line
         header_match = re.match(r"^\*?([a-zA-Z_][a-zA-Z0-9_]*)\*?\s*:(.*)$", stripped)
         if header_match:
             fname = header_match.group(1).strip()
@@ -353,17 +350,11 @@ def _parse_output(
             if fname in field_types:
                 current_field = fname
                 in_pros, in_cons = False, False
-
-                # Could be block header (rest is empty) or inline legacy format
                 if rest:
-                    # field_name: CODE | reasoning  OR  field_name: CODE - reasoning
                     value_str = re.split(r"\s*[|\-]\s*", rest)[0].strip()
                     _store_label(fname, value_str, field_types, labels)
                 continue
 
-            # Positional fallback: the model output the literal placeholder
-            # "FIELD_NAME:" instead of a real field name.  Map by occurrence order
-            # so the Nth placeholder block → Nth question.
             if fname.upper() == "FIELD_NAME":
                 if _placeholder_count < len(questions):
                     current_field = questions[_placeholder_count]["field_name"]
@@ -374,30 +365,23 @@ def _parse_output(
                         _store_label(current_field, value_str, field_types, labels)
                 continue
 
-            # Sub-keys inside a field block (case-insensitive)
             fname_l = fname.lower()
             if current_field and fname_l == "verdict":
-                value_str = rest.strip()
-                _store_label(current_field, value_str, field_types, labels)
+                _store_label(current_field, rest.strip(), field_types, labels)
                 continue
-
             if current_field and fname_l == "probabilities":
                 probs = _parse_probabilities(rest)
                 if probs:
-                    probabilities[current_field] = probs
+                    prob_distribution[current_field] = probs
                 continue
-
             if current_field and fname_l == "confidence":
                 try:
-                    conf_val = float(rest.strip())
-                    if conf_val > 1.0:
-                        conf_val /= 100.0
-                    confidence[current_field] = conf_val
+                    v = float(rest.strip())
+                    per_field_confidence[current_field] = v / 100.0 if v > 1.0 else v
                 except ValueError:
                     pass
                 continue
 
-        # Indented sub-keys (with leading spaces)
         indent_match = re.match(r"^\s+(verdict|probabilities|confidence)\s*:\s*(.+)$", line, re.IGNORECASE)
         if indent_match and current_field:
             key = indent_match.group(1).lower()
@@ -407,29 +391,96 @@ def _parse_output(
             elif key == "probabilities":
                 probs = _parse_probabilities(val)
                 if probs:
-                    probabilities[current_field] = probs
+                    prob_distribution[current_field] = probs
             elif key == "confidence":
                 try:
-                    conf_val = float(val)
-                    if conf_val > 1.0:
-                        conf_val /= 100.0
-                    confidence[current_field] = conf_val
+                    v = float(val)
+                    per_field_confidence[current_field] = v / 100.0 if v > 1.0 else v
                 except ValueError:
                     pass
             continue
 
-    # ── Derive confidence from probabilities where missing ───────────────────
+    # Derive missing per-field confidence from prob_distribution
     for fname, label_val in labels.items():
-        if fname not in confidence and fname in probabilities:
+        if fname not in per_field_confidence and fname in prob_distribution:
             verdict_code = label_val if isinstance(label_val, str) else (label_val[0] if label_val else None)
-            if verdict_code and verdict_code in probabilities[fname]:
-                confidence[fname] = probabilities[fname][verdict_code]
+            if verdict_code and verdict_code in prob_distribution[fname]:
+                per_field_confidence[fname] = prob_distribution[fname][verdict_code]
 
-    return labels, probabilities, confidence, pros, cons
+    # Overall confidence = mean of per-field values
+    confidence: float | None = None
+    if per_field_confidence:
+        confidence = round(sum(per_field_confidence.values()) / len(per_field_confidence), 4)
+
+    return labels, prob_distribution, confidence, pros, cons
+
+
+def _parse_deliberation(
+    raw_text: str,
+    questions: list[dict],
+) -> tuple[str, dict, float | None, list[str], list[str]]:
+    """
+    Parse free-text deliberation response.
+    Extracts the main contribution, confidence (if reported), pros and cons.
+    """
+    pros: list[str] = []
+    cons: list[str] = []
+    confidence: float | None = None
+    contribution_lines: list[str] = []
+
+    lines = raw_text.splitlines()
+    in_pros = False
+    in_cons = False
+    in_contribution = True
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if stripped.lower().startswith("pros:") or stripped.lower() == "pros":
+            in_pros, in_cons, in_contribution = True, False, False
+            continue
+        if stripped.lower().startswith("cons:") or stripped.lower() == "cons":
+            in_cons, in_pros, in_contribution = True, False, False
+            continue
+
+        # Confidence line: "confidence: 0.85"
+        conf_match = re.match(r"^confidence\s*:\s*([0-9.]+)", stripped, re.IGNORECASE)
+        if conf_match:
+            in_contribution = False
+            try:
+                v = float(conf_match.group(1))
+                confidence = v / 100.0 if v > 1.0 else v
+            except ValueError:
+                pass
+            continue
+
+        if in_pros:
+            text = stripped[1:].strip() if stripped.startswith("-") else stripped
+            pros.append(text)
+        elif in_cons:
+            text = stripped[1:].strip() if stripped.startswith("-") else stripped
+            cons.append(text)
+        elif in_contribution:
+            contribution_lines.append(stripped)
+
+    # For text-only questions, also parse simple field: answer lines
+    if questions and not _is_classification_task(questions):
+        field_answers: dict[str, str] = {}
+        field_types = {q["field_name"]: q["field_type"] for q in questions}
+        for line in lines:
+            m = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+)$", line)
+            if m and m.group(1) in field_types:
+                field_answers[m.group(1)] = m.group(2).strip()
+        if field_answers:
+            return field_answers, {}, confidence, pros, cons
+
+    contribution = " ".join(contribution_lines).strip() or raw_text.strip()
+    return contribution, {}, confidence, pros, cons
 
 
 def _store_label(fname: str, value_str: str, field_types: dict, labels: dict) -> None:
-    """Parse a verdict string and store into labels dict."""
     ftype = field_types.get(fname, "single_label")
     if ftype == "multi_label":
         labels[fname] = [v.strip() for v in value_str.split(",") if v.strip()]
@@ -445,7 +496,6 @@ def _store_label(fname: str, value_str: str, field_types: dict, labels: dict) ->
 
 
 def _parse_probabilities(raw: str) -> dict[str, float]:
-    """Parse 'CODE1=0.70, CODE2=0.20' into {CODE1: 0.70, CODE2: 0.20}."""
     result: dict[str, float] = {}
     for part in raw.split(","):
         part = part.strip()
@@ -478,7 +528,12 @@ class Agent:
         self.name: str = config.get("name", "Agent")
         self.provider: str = config.get("provider", "OpenAI")
         self.model: str = config.get("model", "gpt-4o")
-        self.role: str = config.get("role", "Annotator")
+
+        # Resolve effective role: if the dropdown says "Custom", use the
+        # custom_role text the user typed; otherwise use the dropdown value.
+        raw_role = config.get("role", "Participant")
+        custom_role_text = config.get("custom_role", "").strip()
+        self.role: str = custom_role_text if raw_role == "Custom" and custom_role_text else raw_role
 
         self._instructions = experiment_config.get("instructions", {})
         self._questions = experiment_config.get("questions", [])
@@ -487,13 +542,6 @@ class Agent:
     def call(self, packet: ContextPacket, dry_run: bool = False) -> AgentOutput:
         """
         Receive a ContextPacket from the hub, call the LLM, return AgentOutput.
-
-        Parameters
-        ----------
-        packet : ContextPacket
-            Built by the hub for this agent's turn.
-        dry_run : bool
-            Skip the LLM call and return a placeholder. Useful for UI testing.
         """
         system_prompt = _build_system_prompt(
             agent_name=self.name,
@@ -505,42 +553,43 @@ class Agent:
         )
 
         user_message = _build_user_message(packet, self._questions)
+        is_classification = _is_classification_task(self._questions)
 
         if dry_run:
-            dummy_labels = {
-                q["field_name"]: (
-                    q["options"][0]["code"] if q.get("options") else "UNKNOWN"
-                )
-                for q in self._questions
-            }
-            dummy_probs = {
-                q["field_name"]: {
-                    opt["code"]: round(1.0 / len(q["options"]), 2)
-                    for opt in q.get("options", [])
+            if is_classification:
+                dummy_contribution = {
+                    q["field_name"]: (q["options"][0]["code"] if q.get("options") else "UNKNOWN")
+                    for q in self._questions
                 }
-                for q in self._questions if q.get("options")
-            }
-            dummy_conf = {
-                q["field_name"]: round(1.0 / max(len(q.get("options", [1])), 1), 2)
-                for q in self._questions
-            }
+                dummy_probs = {
+                    q["field_name"]: {
+                        opt["code"]: round(1.0 / len(q["options"]), 2)
+                        for opt in q.get("options", [])
+                    }
+                    for q in self._questions if q.get("options")
+                }
+                n_fields = max(len(self._questions), 1)
+                dummy_conf = round(1.0 / max(len(self._questions[0].get("options", [1])), 1), 2) if self._questions else 0.5
+            else:
+                dummy_contribution = "[dry-run: no contribution]"
+                dummy_probs = {}
+                dummy_conf = 0.5
+
             return AgentOutput(
                 agent_name=self.name,
                 cycle=packet.cycle,
-                labels=dummy_labels,
-                probabilities=dummy_probs,
+                contribution=dummy_contribution,
+                prob_distribution=dummy_probs,
                 confidence=dummy_conf,
-                pros=["[dry-run placeholder]"],
-                cons=["[dry-run placeholder]"],
+                pros=["[dry-run]"],
+                cons=["[dry-run]"],
                 raw_response="[dry-run]",
             )
 
         try:
-            from openai import OpenAI  # lazy import - not required at module level
+            from openai import OpenAI
+            client = OpenAI()
 
-            client = OpenAI()  # reads OPENAI_API_KEY from environment
-            
-            # Build user content - multimodal whenever image data can be resolved.
             image_url = _resolve_image_url(packet.item_data)
             if image_url:
                 user_content: Any = [
@@ -548,17 +597,14 @@ class Agent:
                     {"type": "image_url", "image_url": {"url": image_url}},
                 ]
             else:
-                # Keep text-only fallback, but retain explicit image refs if provided
-                # so the model still receives image context when attachment fails.
                 fallback_refs = [
                     str(packet.item_data.get(k)).strip()
-                    for k in _IMAGE_KEYS
-                    if packet.item_data.get(k)
+                    for k in _IMAGE_KEYS if packet.item_data.get(k)
                 ]
                 if fallback_refs:
                     user_content = (
                         user_message
-                        + "\n\n[Image reference provided but could not be attached as vision input]: "
+                        + "\n\n[Image reference (could not attach as vision input)]: "
                         + ", ".join(fallback_refs)
                     )
                 else:
@@ -571,21 +617,23 @@ class Agent:
                     {"role": "user", "content": user_content},
                 ],
                 temperature=0.0,
-                max_tokens=1500,  # increased to fit full probability distributions
+                max_tokens=1500,
             )
             raw_text = response.choices[0].message.content or ""
 
         except Exception as exc:
             raw_text = f"[ERROR: {exc}]"
 
-        labels, probs, conf, pros, cons = _parse_output(raw_text, self._questions)
+        contribution, prob_dist, confidence, pros, cons = _parse_contribution(
+            raw_text, self._questions
+        )
 
         return AgentOutput(
             agent_name=self.name,
             cycle=packet.cycle,
-            labels=labels,
-            probabilities=probs,
-            confidence=conf,
+            contribution=contribution,
+            prob_distribution=prob_dist,
+            confidence=confidence,
             pros=pros,
             cons=cons,
             raw_response=raw_text,
