@@ -9,8 +9,8 @@ Components
   PeerReviewRound
   ---------------
   Prompts each agent to score all other agents on the five quality
-  dimensions. Coalition scores are not requested separately; they are
-  derived from the reported consensus dimension.
+  dimensions and report a coalition agreement score (0-1) per peer.
+  Returns a list of PeerReviewOutput objects.
 
   Ecu formula (eq. 1 in simulation section):
     ecu_i = sum_q  w_q * (1/(n-1)) * sum_{j≠i} s_{ji}(q)
@@ -21,7 +21,7 @@ Components
   CoalitionTracker
   ----------------
   After each round's peer review, finds the largest subset of agents
-  with mutual consensus scores ≥ τ (in both directions).
+  with mutual coalition agreement ≥ τ (in both directions).
 
   EcuLedger
   ---------
@@ -80,10 +80,9 @@ DEFAULT_DIMENSIONS: list[dict] = [
         "name": "consensus",
         "label": "Consensus",
         "rubric": (
-            "Does the contribution move the deliberation toward a productive collective "
-            "outcome, either by building agreement, specifying conditions for agreement, "
-            "or clarifying constructive disagreement? "
-            "0 = blocks collective progress; 1 = strongly supports collective progress."
+            "Does the contribution constructively advance group agreement or "
+            "productively engage with opposing views? "
+            "0 = purely divisive; 1 = constructively bridges perspectives."
         ),
     },
 ]
@@ -97,26 +96,31 @@ class PeerReviewRound:
     """
     Builds the Phase 2 peer review prompt and parses the response.
 
-    The actual LLM call is made by the Agent (via agent.call() with a
-    peer-review ContextPacket) — not here. This class only handles
-    prompt construction and response parsing.
+    The actual LLM call is made by the Agent via the protocol — not here.
+    This class handles prompt construction and response parsing only.
 
     Parameters
     ----------
     dimensions : list[dict]
     include_self_assessment : bool
+    review_depth : str
+        φ₂ — how much contribution history the reviewer sees.
+        "current_only"   → only the current round's contribution
+        "previous_round" → current + previous round side-by-side
+        "full_history"   → full trajectory across all rounds
     dry_run : bool
-        If True, build_prompt() still works but parse() returns uniform 0.5 scores.
     """
 
     def __init__(
         self,
         dimensions: list[dict] | None = None,
         include_self_assessment: bool = False,
+        review_depth: str = "previous_round",
         dry_run: bool = False,
     ):
         self.dimensions = dimensions or DEFAULT_DIMENSIONS
         self.include_self_assessment = include_self_assessment
+        self.review_depth = review_depth
         self.dry_run = dry_run
 
     def build_prompt(
@@ -127,17 +131,30 @@ class PeerReviewRound:
         cycle: int,
         item_context: str = "",
         ecu_info: str = "",
+        reviewer_role: str = "",
+        agent_histories: dict[str, list[str]] | None = None,
     ) -> str:
-        """Build the peer review prompt to be sent to the reviewing agent."""
+        """
+        Build the peer review prompt.
+
+        Parameters
+        ----------
+        agent_histories : dict[str, list[str]] | None
+            Per-agent contribution history from hub.build_review_history().
+            {agent_name: [contribution_round_0, contribution_round_1, ...]}
+            Used when review_depth != "current_only".
+        """
         review_targets = list(all_contributions.keys()) if self.include_self_assessment \
             else [n for n in all_contributions if n != reviewer_name]
 
         dim_names = [d["name"] for d in self.dimensions]
+        has_history = agent_histories and self.review_depth != "current_only"
         lines: list[str] = []
 
         lines.append(
-            f"You are {reviewer_name}. The contribution round has just ended. "
-            "Now complete the peer review table below."
+            f"You are {reviewer_name}."
+            + (f" {reviewer_role}." if reviewer_role else "")
+            + " The contribution round has just ended. Complete the peer review below."
         )
         lines.append(f"Topic: {item_context}")
         lines.append("")
@@ -154,23 +171,53 @@ class PeerReviewRound:
         lines.append(f"  {contrib_text}")
         lines.append("")
 
-        lines.append("All contributions this round:")
-        for name, contrib in all_contributions.items():
-            if name == reviewer_name:
-                continue
-            text = contrib if isinstance(contrib, str) \
-                else json.dumps(contrib, ensure_ascii=False)
-            lines.append(f"  [{name}]: {text}")
+        # Show peer contributions — with or without history
+        if has_history:
+            depth_label = {
+                "previous_round": "current round + previous round",
+                "full_history": "all rounds",
+            }.get(self.review_depth, "")
+            lines.append(
+                f"Contributions per agent ({depth_label}) — "
+                "most recent is labelled [current]:"
+            )
+            for name, contrib in all_contributions.items():
+                if name == reviewer_name and not self.include_self_assessment:
+                    continue
+                lines.append(f"  [{name}]")
+                history = agent_histories.get(name, [])
+                # Show history entries oldest-first, mark the last as [current]
+                if len(history) > 1:
+                    for i, h in enumerate(history[:-1]):
+                        lines.append(f"    Round {cycle - (len(history)-1-i)}: {h}")
+                if history:
+                    lines.append(f"    [current]: {history[-1]}")
+                else:
+                    current_text = contrib if isinstance(contrib, str) \
+                        else json.dumps(contrib, ensure_ascii=False)
+                    lines.append(f"    [current]: {current_text}")
+        else:
+            lines.append("Contributions this round:")
+            for name, contrib in all_contributions.items():
+                if name == reviewer_name and not self.include_self_assessment:
+                    continue
+                text = contrib if isinstance(contrib, str) \
+                    else json.dumps(contrib, ensure_ascii=False)
+                lines.append(f"  [{name}]: {text}")
         lines.append("")
 
-        lines.append(
-            "Score each agent listed below on the five quality dimensions "
-            "(0.00 to 1.00 each). The platform will derive coalitions from "
-            "the mutual consensus scores; do NOT report a separate coalition or agreement score. "
-            "Add a one-sentence justification for your review."
-        )
+        lines.append("For each agent, provide:")
+        lines.append("  1. Quality scores on five dimensions (0.00 to 1.00 each).")
+        lines.append("  2. A one-sentence justification summarising your overall assessment.")
+        if has_history:
+            lines.append(
+                "For the consensus dimension specifically: "
+                "score whether this agent's position CHANGED meaningfully from their "
+                "previous round in response to others' arguments. "
+                "0 = no change at all, 1 = substantially updated position."
+            )
         lines.append("")
-        lines.append("Scoring rubrics:")
+        lines.append("Quality dimension rubrics:")
         for d in self.dimensions:
             lines.append(f"  {d['label']} ({d['name']}): {d['rubric']}")
         lines.append("")
@@ -193,7 +240,12 @@ class PeerReviewRound:
         raw: str,
         all_contributions: dict[str, Any],
     ) -> PeerReviewOutput:
-        """Parse the agent's raw response into a PeerReviewOutput."""
+        """
+        Parse the agent's raw response into a PeerReviewOutput.
+
+        Coalition scores are derived from the consensus dimension score —
+        no separate coalition_agreement field is asked or parsed.
+        """
         review_targets = list(all_contributions.keys()) if self.include_self_assessment \
             else [n for n in all_contributions if n != reviewer_name]
         dim_names = [d["name"] for d in self.dimensions]
@@ -207,19 +259,19 @@ class PeerReviewRound:
                 {d: 0.5 for d in dim_names}
                 if self.include_self_assessment else None
             )
+            # Derive coalition from consensus (dry-run: 0.5)
             return PeerReviewOutput(
                 reviewer_name=reviewer_name,
                 cycle=cycle,
                 scores=scores,
                 self_scores=self_scores,
                 coalition_scores={n: 0.5 for n in all_contributions if n != reviewer_name},
-                review_justifications={n: "[dry-run]" for n in all_contributions if n != reviewer_name},
+                coalition_justifications={},
                 raw_response="[dry-run]",
             )
 
         scores: dict[str, dict[str, float]] = {}
         self_scores: dict[str, float] | None = None
-        coalition: dict[str, float] = {}
         justifications: dict[str, str] = {}
 
         try:
@@ -242,9 +294,6 @@ class PeerReviewRound:
                     self_scores = dim_scores
                 else:
                     scores[name] = dim_scores
-                    # Coalition is derived from the consensus quality score.
-                    # No separate agreement/coalition score is requested from agents.
-                    coalition[name] = dim_scores.get("consensus", 0.5)
                     justifications[name] = str(entry.get("justification", ""))
 
         except Exception as exc:
@@ -252,8 +301,13 @@ class PeerReviewRound:
             for name in review_targets:
                 if name != reviewer_name:
                     scores[name] = {d: 0.5 for d in dim_names}
-                    coalition[name] = scores[name].get("consensus", 0.5)
                     justifications[name] = ""
+
+        # Derive coalition scores from the consensus dimension
+        coalition: dict[str, float] = {
+            name: scores[name].get("consensus", 0.5)
+            for name in scores
+        }
 
         return PeerReviewOutput(
             reviewer_name=reviewer_name,
@@ -261,7 +315,7 @@ class PeerReviewRound:
             scores=scores,
             self_scores=self_scores,
             coalition_scores=coalition,
-            review_justifications=justifications,
+            coalition_justifications=justifications,
             raw_response=raw,
         )
 
@@ -309,12 +363,12 @@ class CoalitionTracker:
     Finds the largest coalition given a round's peer review outputs.
 
     A coalition is a subset S ⊆ N such that for all i,j ∈ S (i≠j):
-        consensus_score[i][j] ≥ τ  AND  consensus_score[j][i] ≥ τ
+        coalition_scores[i][j] ≥ τ  AND  coalition_scores[j][i] ≥ τ
 
     Parameters
     ----------
     threshold : float
-        Minimum mutual consensus score τ (default 0.6).
+        Minimum mutual agreement score τ (default 0.6).
     """
 
     def __init__(self, threshold: float = 0.6):
@@ -328,8 +382,7 @@ class CoalitionTracker:
         Return the largest coalition from this round's peer review outputs.
         If multiple coalitions of the same size exist, returns the first found.
         """
-        # Build consensus matrix: agree[i][j] = consensus score reviewer i gives agent j.
-        # The attribute is still called coalition_scores for backward compatibility.
+        # Build agreement matrix: agree[i][j] = score i gives j
         agree: dict[str, dict[str, float]] = {}
         for r in reviews:
             agree[r.reviewer_name] = r.coalition_scores

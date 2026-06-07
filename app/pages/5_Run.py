@@ -27,9 +27,8 @@ if str(ROOT) not in sys.path:
 
 from core.agent import Agent
 from core.hub import CommunicationHub
-from core.protocols import RunEvent
 from core.protocols.gossip import GossipProtocol
-from core.state import AgentOutput
+from core.protocols.crowd import CrowdProtocol
 from core.ecu import EcuLedger, PeerReviewRound, CoalitionTracker, DEFAULT_DIMENSIONS
 
 st.set_page_config(page_title="Run Experiment", page_icon="🚀", layout="wide")
@@ -38,8 +37,7 @@ st.set_page_config(page_title="Run Experiment", page_icon="🚀", layout="wide")
 st.sidebar.title("Experiment Builder")
 st.sidebar.caption("▶ Running")
 st.sidebar.progress(1.0)
-st.sidebar.markdown(
-    """
+st.sidebar.markdown("""
 **Steps**
 1. Overview
 2. Agents
@@ -63,14 +61,14 @@ def build_agents(cfg: dict) -> list[Agent]:
 def build_protocol(agents: list[Agent], cfg: dict, dry_run: bool,
                    peer_reviewer=None, coalition_tracker=None):
     """Return the correct protocol instance based on the configured setting."""
-    setting = cfg.get("protocol", {}).get("setting", "Gossip (sequential)")
-    if setting == "Gossip (sequential)":
-        return GossipProtocol(agents, cfg, peer_reviewer=peer_reviewer,
-                              coalition_tracker=coalition_tracker, dry_run=dry_run)
-    elif setting == "Crowd (parallel)":
-        from core.protocols.crowd import CrowdProtocol
+    setting = cfg.get("protocol", {}).get("setting", "Simultaneous")
+    # Support both new names and legacy names from saved configs
+    if setting in ("Simultaneous", "Crowd (parallel)"):
         return CrowdProtocol(agents, cfg, peer_reviewer=peer_reviewer,
                              coalition_tracker=coalition_tracker, dry_run=dry_run)
+    elif setting in ("Sequential", "Gossip (sequential)"):
+        return GossipProtocol(agents, cfg, peer_reviewer=peer_reviewer,
+                              coalition_tracker=coalition_tracker, dry_run=dry_run)
     raise ValueError(f"Unknown protocol setting: '{setting}'")
 
 
@@ -138,7 +136,7 @@ def results_to_df(results: list[dict]) -> pd.DataFrame:
             "originator": r["originator_name"],
         }
 
-        # Coalition outcome — the key result for deliberation
+        # Coalition outcome
         coalition_hist = r.get("coalition_history", {}).get("history", [])
         if coalition_hist:
             last = coalition_hist[-1]
@@ -183,61 +181,45 @@ def results_to_df(results: list[dict]) -> pd.DataFrame:
 st.title("🚀 Run Experiment")
 cfg = get_config()
 
-# ── Guard ─────────────────────────────────────────────────────────────────────
+# ── Guard: check experiment is configured ─────────────────────────────────────
 agents_cfg = cfg.get("agents", [])
+questions = cfg.get("questions", [])
+task_mode = cfg.get("task", {}).get("mode", "deliberation")
 dataset_cfg = cfg.get("dataset", {})
 df: pd.DataFrame | None = st.session_state.get("dataset_df")
 column_mapping: dict = st.session_state.get("column_mapping", {})
-
-# Deliberation mode: use the topic/question as a one-row internal dataset.
-if df is None:
-    topic = cfg.get("task", {}).get("description", "").strip()
-    if topic:
-        df = pd.DataFrame([{"topic": topic}])
-        st.session_state.dataset_df = df
-        column_mapping = {"topic": "topic"}
-        st.session_state.column_mapping = column_mapping
-        cfg.setdefault("dataset", {}).update({
-            "source": "single_topic",
-            "num_rows": 1,
-            "columns": ["topic"],
-        })
 
 missing = []
 if not agents_cfg:
     missing.append("No agents configured — go to Step 2")
 if df is None:
-    missing.append("No deliberation topic loaded — go to Step 3")
+    missing.append("No deliberation topic set — go to Step 3")
 
 if missing:
     st.error("Cannot run - please complete setup first:")
     for m in missing:
         st.markdown(f"- {m}")
     if st.button("← Back to Review"):
-        st.switch_page("pages/4_Review.py")
+        st.switch_page("pages/5_Review.py")
     st.stop()
 
 # ── Run configuration panel ───────────────────────────────────────────────────
 with st.container(border=True):
     st.subheader("Run configuration")
 
-    col1, col2, col3 = st.columns([2, 2, 3])
+    col1, col2 = st.columns([2, 3])
 
     with col1:
         n_items = st.number_input(
-            "Topics to process",
+            "Items to process",
             min_value=1,
             max_value=len(df),
             value=min(5, len(df)),
             step=1,
-            help=f"Current run has {len(df)} deliberation item(s).",
+            help=f"Dataset has {len(df)} rows total.",
         )
 
     with col2:
-        st.metric("Run mode", "Live API")
-        dry_run = False
-
-    with col3:
         api_key_input = st.text_input(
             "OpenAI API key",
             type="password",
@@ -245,32 +227,23 @@ with st.container(border=True):
             help="Leave blank if OPENAI_API_KEY is already set in your environment.",
         )
 
-    proto = cfg.get("protocol", {})
-    ecu_cfg_display = cfg.get("ecu", {})
-    c1, c2, c3, c4, c5 = st.columns([4, 2, 2, 2, 3])
-    c1.metric("Setting", proto.get("setting", "-"))
-    c2.metric("Agents", len(agents_cfg))
-    c3.metric("Max cycles", proto.get("max_cycles", "-"))
-    c4.metric("Stopping rule", proto.get("stopping_rule", "-"))
-    ecu_status = "✅ ON" if ecu_cfg_display.get("enabled") else "❌ OFF"
-    c5.metric("ECU / peer review", ecu_status)
-    if not ecu_cfg_display.get("enabled"):
-        st.warning(
-            "ECU scoring is disabled — peer review will not run. "
-            "Enable it in Step 2 under 'ECU quality dimensions' to see peer review and ECU output.",
-            icon="⚠️",
-        )
+dry_run = False  # Always use real API calls
+
+proto = cfg.get("protocol", {})
+c1, c2, c3, c4 = st.columns([5, 2, 2, 3])
+c1.metric("Setting", proto.get("setting", "-"))
+c2.metric("Agents", len(agents_cfg))
+c3.metric("Max cycles", proto.get("max_cycles", "-"))
+c4.metric("Stopping rule", proto.get("stopping_rule", "-"))
 
 # ── Results renderer (called both after run and on download rerun) ────────────
 def _show_results(results: list[dict], experiment_cfg: dict) -> None:
     st.divider()
     st.subheader("Results")
 
-    n_converged = sum(1 for r in results if r["converged"])
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     col1.metric("Items processed", len(results))
-    col2.metric("Converged", f"{n_converged} / {len(results)}")
-    col3.metric("Total turns", sum(r["num_turns"] for r in results))
+    col2.metric("Total turns", sum(r["num_turns"] for r in results))
 
     results_df = results_to_df(results)
     st.dataframe(results_df, width="stretch", hide_index=True)
@@ -278,25 +251,68 @@ def _show_results(results: list[dict], experiment_cfg: dict) -> None:
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
     exp_name = experiment_cfg.get("overview", {}).get("name", "experiment").replace(" ", "_").lower()
 
-    dl1, dl2 = st.columns(2)
+    dl1, dl2, dl3 = st.columns(3)
     with dl1:
         csv_bytes = results_df.to_csv(index=False).encode()
         st.download_button(
-            "⬇ Download results CSV",
+            "⬇ Results CSV",
             data=csv_bytes,
             file_name=f"{exp_name}_{timestamp}_results.csv",
             mime="text/csv",
-            width="stretch",
+            use_container_width=True,
         )
     with dl2:
         full_json = json.dumps(results, indent=2, ensure_ascii=False, default=str)
         st.download_button(
-            "⬇ Download full log JSON",
+            "⬇ Full log JSON",
             data=full_json.encode(),
             file_name=f"{exp_name}_{timestamp}_log.json",
             mime="application/json",
-            width="stretch",
+            use_container_width=True,
         )
+    with dl3:
+        # Prompt log: extract prompt_log from all results
+        prompt_entries = []
+        for r in results:
+            for entry in r.get("prompt_log", []):
+                prompt_entries.append({"item_id": r["item_id"], **entry})
+        prompt_json = json.dumps(prompt_entries, indent=2, ensure_ascii=False, default=str)
+        st.download_button(
+            "⬇ Prompt log JSON",
+            data=prompt_json.encode(),
+            file_name=f"{exp_name}_{timestamp}_prompts.json",
+            mime="application/json",
+            use_container_width=True,
+            help="All prompts and responses sent/received — for verifying information visibility settings.",
+        )
+
+
+def _show_nav_buttons():
+    st.divider()
+    nav1, nav2 = st.columns(2)
+    with nav1:
+        if st.button("🔄 Restart debate", use_container_width=True,
+                     help="Clear results and run the same experiment again."):
+            st.session_state.pop("run_results", None)
+            st.rerun()
+    with nav2:
+        if st.button("✨ Start new experiment", use_container_width=True, type="primary",
+                     help="Clear all settings and start from scratch."):
+            keys_to_clear = [
+                "experiment_config", "question_sets",
+                "base_instructions", "guideline_notes", "agent_prompt_overrides",
+                "agents", "num_agents", "interaction_setting", "supervision_mode",
+                "visibility_mode", "review_depth", "order_type", "max_cycles",
+                "stopping_rule", "initializer_agent", "judge_agent",
+                "exp_name", "author", "protocol_id", "task_description",
+                "dataset_df", "dataset_filename", "column_mapping", "dataset_ready",
+                "dataset_source", "inline_rows", "run_results",
+                "ecu_enabled", "ecu_info_condition", "ecu_self_assessment",
+                "ecu_coalition_threshold", "ecu_dimensions",
+            ]
+            for key in keys_to_clear:
+                st.session_state.pop(key, None)
+            st.switch_page("pages/1_Welcome.py")
 
 
 # ── Launch button ─────────────────────────────────────────────────────────────
@@ -308,48 +324,53 @@ if not launch:
     # If a previous run's results are stored, show them even without relaunching
     if "run_results" in st.session_state:
         _show_results(st.session_state["run_results"], cfg)
+        _show_nav_buttons()
     st.stop()
 
 # Clear any previous results so a fresh run always starts clean
 st.session_state.pop("run_results", None)
 
 # ── Set API key if provided ───────────────────────────────────────────────────
-if api_key_input:
+if not dry_run and api_key_input:
     os.environ["OPENAI_API_KEY"] = api_key_input
-if not os.environ.get("OPENAI_API_KEY"):
-    st.error("OpenAI API key is required for a live run.")
-    st.stop()
 
 # ── Build agents ──────────────────────────────────────────────────────────────
 agents = build_agents(cfg)
 agent_names = [a.name for a in agents]
-visibility_mode = proto.get("visibility_mode", "Current state only")
-
-# ── ECU settings ──────────────────────────────────────────────────────────────
-ecu_cfg = cfg.get("ecu", {})
-ecu_enabled = ecu_cfg.get("enabled", False)
-ecu_info_condition = ecu_cfg.get("info_condition", "opaque")
-include_self_assessment = ecu_cfg.get("include_self_assessment", False)
-coalition_threshold = float(ecu_cfg.get("coalition_threshold", 0.6))
+visibility_mode = proto.get("visibility_mode", "Previous round")
+review_depth = proto.get("review_depth", "previous_round")
 
 # ── Diagnostics ───────────────────────────────────────────────────────────────
 with st.expander("🔍 Pre-run diagnostics", expanded=False):
+    st.markdown(f"**Task mode:** {task_mode}")
     st.markdown(f"**Agents:** {[a.name for a in agents]}")
     st.markdown(f"**Visibility mode:** {visibility_mode}")
     st.markdown(f"**Column mapping:** {st.session_state.get('column_mapping', {})}")
-    if not ecu_enabled:
-        st.warning("ECU / peer review is disabled. Enable in Step 2 to see scoring and coalition output.")
+
+    if task_mode == "classification":
+        if cfg.get("questions"):
+            st.markdown("**Question fields:** " + ", ".join(
+                f"`{q['field_name']}`" for q in cfg["questions"]
+            ))
     else:
-        st.success(f"ECU enabled · info condition: {ecu_info_condition} · coalition τ={coalition_threshold}")
+        st.info("Deliberation mode — no questions required. Agents produce free-text contributions.")
+
+    # Image diagnostics (only relevant when images are in the dataset)
     img_dir = st.session_state.get("dataset_image_dir")
     if img_dir:
+        st.divider()
+        st.markdown("**Image resolution diagnostics**")
+        st.success(f"Image temp dir: `{img_dir}`")
         try:
-            st.markdown(f"**Image dir:** `{img_dir}` ({len(__import__('os').listdir(img_dir))} files)")
-        except Exception:
-            pass
+            files_on_disk = os.listdir(img_dir)
+            st.markdown(f"Files in temp dir ({len(files_on_disk)} total), first 10:")
+            st.code("\n".join(files_on_disk[:10]))
+        except Exception as e:
+            st.error(f"Cannot list temp dir: {e}")
+
     st.divider()
     if agents:
-        st.markdown("**System prompt preview (first agent):**")
+        st.markdown("**System prompt preview (Agent 1):**")
         from core.agent import _build_system_prompt
         preview = _build_system_prompt(
             agent_name=agents[0].name,
@@ -357,11 +378,17 @@ with st.expander("🔍 Pre-run diagnostics", expanded=False):
             base_instructions=cfg.get("instructions", {}).get("base_instructions", ""),
             guideline_notes=cfg.get("instructions", {}).get("guideline_notes", ""),
             agent_overrides=cfg.get("agent_prompt_overrides", {}),
-            questions=[],
+            questions=cfg.get("questions", []) if task_mode == "classification" else [],
         )
         st.code(preview, language=None)
 
 # ── Build ECU peer reviewer and ledger (if enabled) ───────────────────────────
+ecu_cfg = cfg.get("ecu", {})
+ecu_enabled = ecu_cfg.get("enabled", False)
+ecu_info_condition = ecu_cfg.get("info_condition", "opaque")
+include_self_assessment = ecu_cfg.get("include_self_assessment", False)
+coalition_threshold = float(ecu_cfg.get("coalition_threshold", 0.6))
+
 peer_reviewer: PeerReviewRound | None = None
 if ecu_enabled:
     dim_configs = ecu_cfg.get("dimensions") or DEFAULT_DIMENSIONS
@@ -369,8 +396,12 @@ if ecu_enabled:
     peer_reviewer = PeerReviewRound(
         dimensions=active_dims,
         include_self_assessment=include_self_assessment,
+        review_depth=review_depth,
         dry_run=dry_run,
     )
+    if dry_run:
+        st.info("ECU peer review is in dry-run mode — all scores will be 0.5.", icon="💡")
+
 # ── Slice dataset ─────────────────────────────────────────────────────────────
 subset = df.head(int(n_items)).reset_index(drop=True)
 
@@ -429,6 +460,7 @@ for item_idx, row in subset.iterrows():
         agent_names=agent_names,
         ledger=item_ledger,
         ecu_info_condition=ecu_info_condition,
+        review_depth=review_depth,
     )
 
     # ── Live turn feed for this item ──────────────────────────────────────
@@ -442,7 +474,7 @@ for item_idx, row in subset.iterrows():
 
         t_start = time.time()
 
-        is_crowd = cfg.get("protocol", {}).get("setting", "") == "Crowd (parallel)"
+        is_crowd = cfg.get("protocol", {}).get("setting", "") in ("Simultaneous", "Crowd (parallel)")
         # In Crowd mode we render one compact "context" block at the START of each
         # new cycle (before any submissions) instead of a per-agent dispatch block.
         _last_crowd_cycle_rendered = -1
@@ -459,18 +491,14 @@ for item_idx, row in subset.iterrows():
                             f"#### 📬 Round {event.cycle + 1} · Context sent to all agents",
                             f"**Agents:** {', '.join(agent_list)}",
                         ]
-                        current = packet.current_contribution
-                        if isinstance(current, dict) and current:
-                            lstr = "  ,  ".join(f"`{k}`: {v}" for k, v in current.items())
-                            dlines.append(f"**Current answers:** {lstr}")
-                        elif isinstance(current, str) and current.strip():
-                            dlines.append(f"**Current position:** {current}")
-                        else:
-                            dlines.append("**Current state:** *(none yet — first round)*")
                         if packet.visible_history:
-                            dlines.append(f"**Visible history:** {len(packet.visible_history)} entry/entries")
+                            round_labels = ", ".join(
+                                f"{h.agent_name} (round {h.cycle + 1})"
+                                for h in packet.visible_history
+                            )
+                            dlines.append(f"**Previous contributions visible:** {round_labels}")
                         else:
-                            dlines.append(f"**Visible history:** *(none — {visibility_mode})*")
+                            dlines.append("**Round 1 — agents contribute blind (no prior context).**")
                         entries.append("\n\n".join(dlines))
                     continue
 
@@ -490,23 +518,42 @@ for item_idx, row in subset.iterrows():
                 if packet.visible_history:
                     lines.append(f"**Visible history** ({len(packet.visible_history)} entry/entries):")
                     for h in packet.visible_history:
-                        h_str = str(h.contribution)[:120]
-                        lines.append(f"- Round {h.cycle + 1} · **{h.agent_name}**: {h_str}")
+                        if h.is_classification:
+                            h_str = "  ,  ".join(f"`{k}`: {v}" for k, v in h.labels.items())
+                        else:
+                            h_str = str(h.contribution)[:120]
+                        real_pros = [p for p in h.pros if p not in ("[dry-run]", "[dry-run placeholder]")]
+                        pros_note = f"  \n  *{real_pros[0]}*" if real_pros else ""
+                        lines.append(f"- Cycle {h.cycle + 1} · **{h.agent_name}**: {h_str}{pros_note}")
                 else:
-                    lines.append(f"**Visible history:** *(none — {visibility_mode})*")
+                    lines.append(f"**Visible history:** *(none — visibility mode: {visibility_mode})*")
 
                 entries.append("\n\n".join(lines))
 
             elif event.kind == "submission":
+                # ── What the agent returned to the hub ───────────────────
                 output = event.output
-                change_note = "✔ submitted" if event.cycle == 0 else "✔ no changes" \
-                    if not any(output.changed.values()) else "✏️ revised"
+                changed_fields = [f for f, c in output.changed.items() if c]
+                change_note = f"✏️ revised: {', '.join(changed_fields)}" if changed_fields else "✔ no changes"
 
-                lines = [f"#### 📨 **{event.agent_name}** → Hub  ·  Round {event.cycle + 1}  ·  {change_note}"]
-                contrib = str(output.contribution) if output.contribution else "*(empty)*"
-                lines.append(f"**Contribution:** {contrib}")
-                if output.confidence is not None:
-                    lines.append(f"**Confidence:** {output.confidence:.2f}")
+                lines = [f"#### 📨 **{event.agent_name}** → Hub  ·  {change_note}"]
+
+                if output.is_classification:
+                    label_str = "  ,  ".join(
+                        f"`{k}`: {v}" for k, v in output.labels.items()
+                    ) if output.labels else "*(no labels parsed)*"
+                    lines.append(f"**Answers:** {label_str}")
+                    if output.prob_distribution:
+                        for fname, probs in output.prob_distribution.items():
+                            conf_str = f"  *(confidence: {output.confidence:.2f})*" if output.confidence is not None else ""
+                            prob_parts = ", ".join(f"{code}={p:.2f}" for code, p in probs.items())
+                            lines.append(f"**{fname} distribution:** {prob_parts}{conf_str}")
+                else:
+                    contrib = str(output.contribution) if output.contribution else "*(empty)*"
+                    lines.append(f"**Contribution:** {contrib}")
+                    if output.confidence is not None:
+                        lines.append(f"**Confidence:** {output.confidence:.2f}")
+
                 if output.pros:
                     real_pros = [p for p in output.pros if p not in ("[dry-run]", "[dry-run placeholder]")]
                     if real_pros:
@@ -515,6 +562,7 @@ for item_idx, row in subset.iterrows():
                     real_cons = [c for c in output.cons if c not in ("[dry-run]", "[dry-run placeholder]")]
                     if real_cons:
                         lines.append("**Cons:** " + " · ".join(f"_{c}_" for c in real_cons))
+
                 if not output.contribution and output.raw_response and not output.raw_response.startswith("[dry-run"):
                     lines.append(f"⚠️ **Raw response (parse failed):**\n```\n{output.raw_response}\n```")
 
@@ -541,25 +589,19 @@ for item_idx, row in subset.iterrows():
                 entries.append("\n\n".join(lines))
 
             elif event.kind == "peer_review":
-                # ── Phase 2: one agent's peer review completed ────────────
-                # Find the review in the hub log
                 round_reviews = [
                     r for r in hub.peer_review_log
                     if r.cycle == event.cycle and r.reviewer_name == event.agent_name
                 ]
                 if round_reviews:
                     review = round_reviews[-1]
-                    lines = [f"#### 📋 **{event.agent_name}** peer review  ·  Cycle {event.cycle + 1}"]
+                    lines = [f"#### 📋 **{event.agent_name}** peer review  ·  Round {event.cycle + 1}"]
                     for reviewed, dim_scores in review.scores.items():
-                        score_str = "  ,  ".join(
-                            f"{d}: {s:.2f}" for d, s in dim_scores.items()
-                        )
-                        # Coalition is derived from the mutual consensus scores.
-                        justification = getattr(review, "review_justifications", {}).get(reviewed, "")
-                        lines.append(
-                            f"→ **{reviewed}**: {score_str}"
-                            + (f"  \n  _{justification}_" if justification and justification != "[dry-run]" else "")
-                        )
+                        score_str = "  ,  ".join(f"{d}: **{s:.2f}**" for d, s in dim_scores.items())
+                        justification = review.coalition_justifications.get(reviewed, "")
+                        lines.append(f"→ **{reviewed}**: {score_str}")
+                        if justification and justification not in ("[dry-run]", ""):
+                            lines.append(f"  _{justification}_")
                     if review.self_scores:
                         self_str = "  ,  ".join(f"{d}: {s:.2f}" for d, s in review.self_scores.items())
                         lines.append(f"→ **Self**: {self_str}")
@@ -580,7 +622,7 @@ for item_idx, row in subset.iterrows():
                         last_coalition = item_coalition.history[-1]
                         c = last_coalition.get("coalition", [])
                         lines.append(
-                            f"Coalition from mutual consensus (τ={coalition_threshold}): "
+                            f"Coalition (τ={coalition_threshold}): "
                             + (f"**{', '.join(c)}**" if c else "*(none)*")
                         )
                     entries.append("\n\n".join(lines))
@@ -590,47 +632,9 @@ for item_idx, row in subset.iterrows():
 
         elapsed = time.time() - t_start
 
-        st.success(
-            f"✅ Done  ·  {hub.num_submissions} turn(s)  ·  {elapsed:.1f}s"
-        )
+        st.success(f"✅ Done  ·  {hub.num_submissions} turn(s)  ·  {elapsed:.1f}s")
 
-        # Coalition outcome — the primary result
-        stopping_reason = "max_cycles"
-        if item_coalition and item_coalition.history:
-            last_c = item_coalition.history[-1]
-            coalition_members = last_c.get("coalition", [])
-            coalition_size = last_c.get("size", 0)
-            if coalition_size == len(agent_names):
-                stopping_reason = "full_coalition"
-                st.success(f"**Full coalition formed:** {', '.join(coalition_members)} ({coalition_size}/{len(agent_names)} agents)")
-            elif coalition_size >= 2:
-                st.info(f"**Partial coalition detected:** {', '.join(coalition_members)} ({coalition_size}/{len(agent_names)} agents)")
-            elif coalition_size == 1:
-                st.warning(f"**No coalition** — only {coalition_members[0]} above threshold τ={coalition_threshold}")
-            else:
-                st.warning(f"**No coalition formed** — no agents above threshold τ={coalition_threshold}")
-        else:
-            st.info("Coalition tracking not active (enable ECU in Step 2).")
-
-        # Final deliberative state: show final argument per agent and the consensus matrix used for coalition detection.
-        final_outputs = {o.agent_name: o for o in hub.log if o.cycle == max([x.cycle for x in hub.log], default=0)}
-        if final_outputs:
-            st.subheader("Final agent arguments")
-            for name in agent_names:
-                out = final_outputs.get(name)
-                if out:
-                    with st.container(border=True):
-                        st.markdown(f"**{name}**")
-                        st.write(out.contribution)
-
-        if item_coalition and item_coalition.history:
-            matrix = item_coalition.history[-1].get("agreement_matrix", {})
-            if matrix:
-                st.subheader("Consensus matrix used for coalition detection")
-                st.caption("Rows are reviewers; columns are reviewed agents. Coalition is derived from mutual consensus scores ≥ τ.")
-                st.dataframe(pd.DataFrame(matrix).T, width="stretch")
-
-        # ECU balances
+        # ECU balances summary
         if hub.ecu_balances:
             bal_cols = st.columns(len(hub.ecu_balances))
             for col, (name, bal) in zip(bal_cols, hub.ecu_balances.items()):
@@ -641,30 +645,17 @@ for item_idx, row in subset.iterrows():
         "item_id": item_id,
         "num_turns": hub.num_submissions,
         "originator_name": hub.originator_name,
-        "converged": hub.converged,
         "ecu_balances": hub.ecu_balances,
         "coalition_history": item_coalition.to_dict() if item_coalition else {},
         "log": [o.to_dict() for o in hub.log],
         "peer_review_log": [p.to_dict() for p in hub.peer_review_log],
-        "final_contributions": {
-            o.agent_name: o.contribution
-            for o in hub.log
-            if o.cycle == max([x.cycle for x in hub.log], default=0)
-        },
-        "stopping_reason": stopping_reason,
+        "prompt_log": hub.prompt_log,
     }
     all_results.append(result)
 
-    # Determine coalition outcome for status table
-    coalition_label = "—"
-    if item_coalition and item_coalition.history:
-        last_c = item_coalition.history[-1]
-        c = last_c.get("coalition", [])
-        coalition_label = ", ".join(c) if len(c) >= 2 else "none"
-
     status_row: dict = {
         "Item": item_id,
-        "Coalition": coalition_label,
+        "Converged": "✅" if hub.converged else "⏹",
         "Turns": hub.num_submissions,
         "Time (s)": f"{elapsed:.1f}",
     }
@@ -691,10 +682,4 @@ st.session_state["run_results"] = all_results
 
 # ── Summary + download ────────────────────────────────────────────────────────
 _show_results(all_results, cfg)
-
-
-
-
-# ==================
-# TODO:
-# - add more LLM providers (Gemini, Anthropic, etc.) - not urgent, to add in the future
+_show_nav_buttons()

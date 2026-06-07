@@ -94,18 +94,6 @@ with main_col:
             "Write them in second person, addressed to the agent."
         )
 
-        uploaded_txt = st.file_uploader(
-            "Load from .txt file (optional)", type=["txt"], key="instructions_uploader"
-        )
-        if uploaded_txt is not None:
-            if st.button("Load from file"):
-                try:
-                    st.session_state.base_instructions = uploaded_txt.getvalue().decode("utf-8")
-                    st.success("Instructions loaded.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to load: {e}")
-
         st.text_area(
             "Base instructions",
             placeholder=(

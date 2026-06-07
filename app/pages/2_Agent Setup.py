@@ -15,9 +15,10 @@ def init_agent_config():
 
     if "protocol" not in st.session_state.experiment_config:
         st.session_state.experiment_config["protocol"] = {
-            "setting": "Crowd (parallel)",
+            "setting": "Simultaneous",
             "supervision_mode": "Unsupervised",
-            "visibility_mode": "Summary only",
+            "visibility_mode": "Previous round",
+            "review_depth": "previous_round",
             "order_type": "Fixed",
             "initializer_agent": "Agent 1",
             "judge_agent": "Agent 3",
@@ -32,6 +33,7 @@ def sync_agents_to_config():
         "setting": st.session_state.interaction_setting,
         "supervision_mode": st.session_state.supervision_mode,
         "visibility_mode": st.session_state.visibility_mode,
+        "review_depth": st.session_state.get("review_depth", "previous_round"),
         "order_type": st.session_state.order_type,
         "initializer_agent": st.session_state.initializer_agent,
         "judge_agent": st.session_state.judge_agent,
@@ -56,30 +58,35 @@ def init_agent_state():
                     "name": "Agent 1",
                     "provider": "OpenAI",
                     "model": "gpt-4o",
-                    "role": "Neutral / Initializer",
+                    "role": "Custom",
+                    "custom_role": "",
                 },
                 {
                     "name": "Agent 2",
                     "provider": "Anthropic",
                     "model": "claude",
-                    "role": "Skeptical reviewer",
+                    "role": "Custom",
+                    "custom_role": "",
                 },
                 {
                     "name": "Agent 3",
                     "provider": "Google",
                     "model": "gemini",
-                    "role": "Conservative validator",
+                    "role": "Custom",
+                    "custom_role": "",
                 },
             ]
 
     if "interaction_setting" not in st.session_state:
-        st.session_state.interaction_setting = protocol.get("setting", "Crowd (parallel)")
+        st.session_state.interaction_setting = protocol.get("setting", "Simultaneous")
 
     if "supervision_mode" not in st.session_state:
         st.session_state.supervision_mode = protocol.get("supervision_mode", "Unsupervised")
 
     if "visibility_mode" not in st.session_state:
-        st.session_state.visibility_mode = protocol.get("visibility_mode", "Summary only")
+        st.session_state.visibility_mode = protocol.get("visibility_mode", "Previous round")
+    if "review_depth" not in st.session_state:
+        st.session_state.review_depth = protocol.get("review_depth", "previous_round")
 
     if "order_type" not in st.session_state:
         st.session_state.order_type = protocol.get("order_type", "Fixed")
@@ -106,7 +113,8 @@ def sync_agents_to_count(n: int):
                     "name": f"Agent {i+1}",
                     "provider": "OpenAI",
                     "model": "gpt-4o",
-                    "role": "Neutral / Initializer" if i == 0 else "Skeptical reviewer",
+                    "role": "Custom",
+                    "custom_role": "",
                 }
             )
     elif len(current) > n:
@@ -121,15 +129,13 @@ init_agent_state()
 st.sidebar.title("Experiment Builder")
 st.sidebar.caption("Step 2 of 4")
 st.sidebar.progress(2 / 4)
-st.sidebar.markdown(
-    """
+st.sidebar.markdown("""
 **Steps**
 1. Overview
 2. Agents
 3. Instructions & topic
 4. Review
-"""
-)
+""")
 
 st.title("Agent Setup")
 st.caption("Configure the agents and the communication protocol.")
@@ -145,8 +151,8 @@ with main_col:
         with c1:
             st.session_state.interaction_setting = st.selectbox(
                 "Interaction setting",
-                ["Gossip (sequential)", "Crowd (parallel)", "Duel (debate)", "Court (judge-based)"],
-                index=["Gossip (sequential)", "Crowd (parallel)", "Duel (debate)", "Court (judge-based)"].index(
+                ["Simultaneous", "Sequential", "Duel (debate)", "Court (judge-based)"],
+                index=["Simultaneous", "Sequential", "Duel (debate)", "Court (judge-based)"].index(
                     st.session_state.interaction_setting
                 ),
             )
@@ -171,75 +177,104 @@ with main_col:
         sync_agents_to_count(num_agents)
         sync_agents_to_config()
 
-        role_options = [
-            "Neutral / Initializer",
-            "Skeptical reviewer",
-            "Conservative validator",
-            "Judge",
-            "Custom",
-        ]
-
-        provider_options = ["OpenAI", "Anthropic", "Google", "Mistral", "Local", "Custom"]
+        provider_options = ["OpenAI", "Anthropic", "Google", "Mistral", "Local"]
 
         for i in range(st.session_state.num_agents):
             agent = st.session_state.agents[i]
+            # Ensure role is always "Custom" going forward
+            agent["role"] = "Custom"
 
             with st.expander(f"Agent {i+1}", expanded=True if i < 3 else False):
-                c1, c2 = st.columns(2)
+                c1, c2, c3 = st.columns(3)
                 with c1:
                     agent["name"] = st.text_input(
                         "Agent name",
                         value=agent["name"],
                         key=f"agent_name_{i}",
+                        placeholder=f"e.g. Economist, Historian, Agent {i+1}",
                     )
                 with c2:
-                    agent["role"] = st.selectbox(
-                        "Role",
-                        role_options,
-                        index=role_options.index(agent["role"]) if agent["role"] in role_options else 0,
-                        key=f"agent_role_{i}",
-                    )
-
-                c3, c4 = st.columns(2)
-                with c3:
                     agent["provider"] = st.selectbox(
                         "Provider",
                         provider_options,
-                        index=provider_options.index(agent["provider"]) if agent["provider"] in provider_options else 0,
+                        index=provider_options.index(agent["provider"])
+                        if agent["provider"] in provider_options else 0,
                         key=f"agent_provider_{i}",
                     )
-                with c4:
+                with c3:
                     agent["model"] = st.text_input(
                         "Model",
                         value=agent["model"],
                         key=f"agent_model_{i}",
                     )
 
-                if agent["role"] == "Custom":
-                    agent["custom_role"] = st.text_area(
-                        "Custom role description",
-                        value=agent.get("custom_role", ""),
-                        key=f"agent_custom_role_{i}",
-                        height=80,
-                        placeholder="Describe how this agent should behave.",
-                    )
+                agent["custom_role"] = st.text_area(
+                    "Role description",
+                    value=agent.get("custom_role", ""),
+                    key=f"agent_custom_role_{i}",
+                    height=80,
+                    placeholder=(
+                        "Describe this agent's perspective, mandate, or persona.\n"
+                        "E.g.: You are an economist. Argue from welfare economics, "
+                        "prioritise quantitative rigour and cite empirical evidence."
+                    ),
+                )
 
     with st.container(border=True):
         st.subheader("3. Information flow")
+        st.caption(
+            "Two separate settings control what agents see — one for each phase of a round."
+        )
 
         c1, c2 = st.columns(2)
         with c1:
-            visibility_options = [
-                "Current state only",
-                "Previous agent only",
-                "Full history",
-                "Summary only",
-            ]
+            phi1_options = ["Blind", "Previous round", "Full history"]
+            phi1_labels = {
+                "Blind": "Blind — agents write without seeing anyone",
+                "Previous round": "Previous round — each agent sees everyone's last contribution",
+                "Full history": "Full history — each agent sees all contributions across all rounds",
+            }
+            # Backwards compatibility: map old labels
+            current_vis = st.session_state.visibility_mode
+            if current_vis in ("Current state only", "Summary only"):
+                st.session_state.visibility_mode = "Previous round"
+            elif current_vis == "Previous agent only":
+                st.session_state.visibility_mode = "Blind"
+
             st.session_state.visibility_mode = st.selectbox(
-                "Information visibility",
-                visibility_options,
-                index=visibility_options.index(st.session_state.visibility_mode),
+                "φ₁ — Phase 1 visibility (before writing contribution)",
+                phi1_options,
+                format_func=lambda x: phi1_labels[x],
+                index=phi1_options.index(st.session_state.visibility_mode)
+                if st.session_state.visibility_mode in phi1_options else 1,
+                help=(
+                    "Controls what each agent sees about other agents' contributions "
+                    "before writing their own position statement."
+                ),
             )
+
+        with c2:
+            phi2_options = ["current_only", "previous_round", "full_history"]
+            phi2_labels = {
+                "current_only": "Current only — see only this round's contribution",
+                "previous_round": "Previous round — see current + previous round side-by-side",
+                "full_history": "Full history — see the full contribution trajectory",
+            }
+            st.session_state.review_depth = st.selectbox(
+                "φ₂ — Phase 2 review depth (during peer review)",
+                phi2_options,
+                format_func=lambda x: phi2_labels[x],
+                index=phi2_options.index(st.session_state.review_depth)
+                if st.session_state.review_depth in phi2_options else 1,
+                help=(
+                    "Controls how much of an agent's contribution history a reviewer "
+                    "sees when scoring that agent. 'Previous round' enables meaningful "
+                    "consensus scoring — the reviewer can assess whether the agent "
+                    "changed their position in response to others."
+                ),
+            )
+
+
 
         with c2:
             order_options = ["Fixed", "Randomized each cycle"]
@@ -251,7 +286,7 @@ with main_col:
 
         agent_names = [agent["name"] for agent in st.session_state.agents]
 
-        if st.session_state.interaction_setting in ["Gossip (sequential)", "Duel (debate)", "Court (judge-based)"]:
+        if st.session_state.interaction_setting in ["Sequential", "Duel (debate)", "Court (judge-based)"]:
             st.session_state.initializer_agent = st.selectbox(
                 "Initializer / first agent",
                 agent_names,
@@ -289,7 +324,7 @@ with main_col:
                 index=stopping_options.index(st.session_state.stopping_rule),
             )
 
-        st.info("Next: define the deliberation topic and agent instructions →")
+        st.info("Next: define agent instructions →")
 
     with st.container(border=True):
         st.subheader("5. ECU quality dimensions")
@@ -336,13 +371,19 @@ with main_col:
             with c1:
                 info_options = ["opaque", "semi-transparent", "transparent"]
                 st.session_state.ecu_info_condition = st.selectbox(
-                    "Information condition",
+                    "T/S/O information condition",
                     info_options,
+                    format_func=lambda x: {
+                        "transparent": "T — Transparent (full weights + all balances)",
+                        "semi-transparent": "S — Semi-transparent (noisy weights + own balance)",
+                        "opaque": "O — Opaque (no ECU/weight information)",
+                    }[x],
                     index=info_options.index(st.session_state.ecu_info_condition),
                     help=(
-                        "Transparent: agents see full weights + all balances.  \n"
-                        "Semi-transparent: agents see noisy weights + own balance only.  \n"
-                        "Opaque: agents see only their own total balance."
+                        "Controls what agents know about the ECU mechanism during Phase 1 and peer review.\n\n"
+                        "T (Transparent): agents see the full weight vector w and all agents' balances.\n"
+                        "S (Semi-transparent): agents see noisy weight estimates (±20%) and only their own balance.\n"
+                        "O (Opaque): agents receive no ECU or weight information — they only see contributions."
                     ),
                 )
             with c2:
@@ -407,12 +448,13 @@ with summary_col:
         st.subheader("Live summary")
         st.markdown(f"**Setting**  \n{st.session_state.interaction_setting}")
         st.markdown(f"**Supervision**  \n{st.session_state.supervision_mode}")
-        st.markdown(f"**Visibility**  \n{st.session_state.visibility_mode}")
+        st.markdown(f"**φ₁ Visibility**  \n{st.session_state.visibility_mode}")
+        st.markdown(f"**φ₂ Review depth**  \n{st.session_state.get('review_depth', 'previous_round')}")
         st.markdown(f"**Order**  \n{st.session_state.order_type}")
         st.markdown(f"**Max cycles**  \n{st.session_state.max_cycles}")
         st.markdown(f"**Stopping rule**  \n{st.session_state.stopping_rule}")
 
-        if st.session_state.interaction_setting in ["Gossip (sequential)", "Duel (debate)", "Court (judge-based)"]:
+        if st.session_state.interaction_setting in ["Sequential", "Duel (debate)", "Court (judge-based)"]:
             st.markdown(f"**Initializer**  \n{st.session_state.initializer_agent}")
 
         if st.session_state.interaction_setting == "Court (judge-based)":

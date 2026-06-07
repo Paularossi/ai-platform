@@ -83,8 +83,17 @@ class CommunicationHub:
     item_data : dict
         Raw input data for this item.
     visibility_mode : str
-        One of: "Current state only", "Previous agent only",
-                "Full history", "Summary only"
+        φ₁ — what each agent sees about others' contributions before writing
+        their own (Phase 1 visibility).
+        "Blind"          → agent sees nothing from previous round
+        "Previous round" → agent sees every agent's most recent contribution
+        "Full history"   → agent sees all contributions from all agents and rounds
+    review_depth : str
+        φ₂ — what a reviewer sees about the agent they are scoring during
+        peer review (Phase 2 review depth).
+        "current_only"   → reviewer sees only the current round's contribution
+        "previous_round" → reviewer sees current + previous round side-by-side
+        "full_history"   → reviewer sees the full contribution trajectory
     agent_names : list[str]
         Ordered list of agent names (used for convergence checks).
     ledger : EcuLedger | None
@@ -104,6 +113,7 @@ class CommunicationHub:
         agent_names: list[str],
         ledger: EcuLedger | None = None,
         ecu_info_condition: str = "opaque",
+        review_depth: str = "previous_round",
     ):
         self.item_id = item_id
         self.item_data = copy.deepcopy(item_data)
@@ -111,9 +121,11 @@ class CommunicationHub:
         self.agent_names = agent_names
         self.ledger = ledger
         self.ecu_info_condition = ecu_info_condition
+        self.review_depth = review_depth
 
         self._log: list[AgentOutput] = []
         self._peer_review_log: list[PeerReviewOutput] = []
+        self._prompt_log: list[dict] = []  # {cycle, agent, phase, prompt, response}
         self._current_contribution: Any = None
         self.originator_name: str | None = None
         self.originator_contribution: Any = None
@@ -129,8 +141,13 @@ class CommunicationHub:
         Called by the protocol just before dispatching to an agent.
         """
         ecu_balances: dict[str, float] = {}
-        if self.ledger and self.ecu_info_condition == "transparent":
-            ecu_balances = self.ledger.balances
+        if self.ledger:
+            if self.ecu_info_condition == "transparent":
+                ecu_balances = self.ledger.balances
+            elif self.ecu_info_condition == "semi-transparent":
+                # Only show this agent's own balance
+                own = self.ledger.balance_for(agent_name)
+                ecu_balances = {agent_name: own}
 
         return ContextPacket(
             item_id=self.item_id,
@@ -292,6 +309,21 @@ class CommunicationHub:
     def submissions_by_agent(self, agent_name: str) -> list[AgentOutput]:
         return [o for o in self._log if o.agent_name == agent_name]
 
+    def log_prompt(self, cycle: int, agent_name: str, phase: str,
+                   prompt: str, response: str = "") -> None:
+        """Record a prompt sent to an agent for debugging."""
+        self._prompt_log.append({
+            "cycle": cycle,
+            "agent": agent_name,
+            "phase": phase,  # "contribution" or "peer_review"
+            "prompt": prompt,
+            "response": response,
+        })
+
+    @property
+    def prompt_log(self) -> list[dict]:
+        return list(self._prompt_log)
+
     @property
     def peer_review_log(self) -> list[PeerReviewOutput]:
         return list(self._peer_review_log)
@@ -312,6 +344,7 @@ class CommunicationHub:
             "num_submissions": self.num_submissions,
             "log": [o.to_dict() for o in self._log],
             "peer_review_log": [p.to_dict() for p in self._peer_review_log],
+            "prompt_log": self._prompt_log,
         }
         if self.ledger:
             d["ecu"] = self.ledger.to_dict()
@@ -321,10 +354,17 @@ class CommunicationHub:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def ecu_info_str(self, cycle: int) -> str:
+    def ecu_info_str(self, cycle: int, calling_agent: str = "") -> str:
         """
-        Build the ECU context string shown to agents based on information condition.
+        Build the ECU context string for a specific agent based on T/S/O condition.
+        Called by protocols before Phase 2 peer review.
         Empty string under opaque condition.
+
+        Parameters
+        ----------
+        calling_agent : str
+            Name of the agent receiving this info. Under semi-transparent,
+            only this agent's own balance is shown.
         """
         if not self.ledger or self.ecu_info_condition == "opaque":
             return ""
@@ -337,45 +377,86 @@ class CommunicationHub:
             b_str = ", ".join(f"{k}={v:.3f}" for k, v in balances.items())
             return (
                 f"[ECU update — Round {cycle + 1}] "
-                f"Current weights: {w_str}. "
-                f"Cumulative balances: {b_str}."
+                f"Weights: {w_str}. "
+                f"All balances: {b_str}."
             )
         elif self.ecu_info_condition == "semi-transparent":
             import random
             noisy = {k: round(v * random.uniform(0.8, 1.2), 2) for k, v in weights.items()}
             w_str = ", ".join(f"{k}≈{v}" for k, v in noisy.items())
-            b_str = ", ".join(f"{k}={v:.3f}" for k, v in balances.items())
+            own_balance = balances.get(calling_agent, 0.0) if calling_agent else 0.0
             return (
                 f"[ECU update — Round {cycle + 1}] "
                 f"Approximate weights: {w_str}. "
-                f"Your balance: {balances.get(list(balances.keys())[0], 0):.3f} ecus."
+                f"Your balance: {own_balance:.3f} ecus."
             )
         return ""
 
     def _build_visible_history(self, agent_name: str) -> list[AgentOutput]:
         """
-        Filter the message log according to visibility_mode.
+        φ₁ — filter the Phase 1 message log per visibility_mode.
 
-        "Current state only"  → empty list
-        "Previous agent only" → last submission in the log
-        "Full history"        → entire log
-        "Summary only"        → last submission per agent
+        "Blind"          → empty list (agent writes without seeing anyone)
+        "Previous round" → last submission from each agent (one per agent)
+        "Full history"   → entire log across all rounds
+
+        Legacy values "Current state only", "Summary only", "Previous agent only"
+        are mapped to their equivalents for backwards compatibility.
         """
         if not self._log:
             return []
 
         mode = self.visibility_mode
 
-        if mode == "Current state only":
+        if mode in ("Blind", "Current state only"):
             return []
-        elif mode == "Previous agent only":
-            return [self._log[-1]]
+        elif mode in ("Previous round", "Summary only"):
+            return list(self._latest_per_agent().values())
         elif mode == "Full history":
             return list(self._log)
-        elif mode == "Summary only":
-            return list(self._latest_per_agent().values())
+        elif mode == "Previous agent only":
+            # Legacy gossip mode — keep for compatibility
+            return [self._log[-1]]
 
-        return list(self._log)
+        return list(self._latest_per_agent().values())
+
+    def build_review_history(self, cycle: int) -> dict[str, list[str]]:
+        """
+        φ₂ — build per-agent contribution history for Phase 2 peer review.
+
+        Returns {agent_name: [contribution_round_0, contribution_round_1, ...]}
+        The caller (protocol) slices this based on review_depth.
+
+        "current_only"   → only the current cycle's contribution
+        "previous_round" → current + previous cycle (if any)
+        "full_history"   → all cycles up to and including current
+        """
+        # Group contributions by agent and cycle
+        per_agent: dict[str, list[tuple[int, Any]]] = {}
+        for out in self._log:
+            if out.agent_name not in per_agent:
+                per_agent[out.agent_name] = []
+            per_agent[out.agent_name].append((out.cycle, out.contribution))
+
+        result: dict[str, list[str]] = {}
+        for agent, entries in per_agent.items():
+            # Sort by cycle
+            entries_sorted = sorted(entries, key=lambda x: x[0])
+
+            if self.review_depth == "current_only":
+                # Only the current cycle
+                current = [c for c in entries_sorted if c[0] == cycle]
+                result[agent] = [str(c[1]) for c in current] if current else []
+
+            elif self.review_depth == "previous_round":
+                # Current + one round back
+                relevant = [c for c in entries_sorted if c[0] >= cycle - 1]
+                result[agent] = [str(c[1]) for c in relevant]
+
+            else:  # "full_history"
+                result[agent] = [str(c[1]) for c in entries_sorted]
+
+        return result
 
     def _latest_per_agent(self) -> dict[str, AgentOutput]:
         """Return {agent_name: most_recent_output} for every agent."""
@@ -383,5 +464,3 @@ class CommunicationHub:
         for output in self._log:
             result[output.agent_name] = output  # later entries overwrite earlier
         return result
-
-#TODO: recompute the changed label for all agents against its own annotations from the previous round (not against the hub aggregation)
