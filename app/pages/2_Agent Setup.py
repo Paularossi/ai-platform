@@ -329,9 +329,9 @@ with main_col:
     with st.container(border=True):
         st.subheader("5. ECU quality dimensions")
         st.caption(
-            "Define the quality dimensions used to score each agent contribution "
-            "and set their initial weights (the weight vector **w**). "
-            "The ecu payout per turn is the weighted sum of dimension scores."
+            "Define the quality dimensions used to score each agent contribution. "
+            "SW weights w^SW are fixed social-planner valuations; ECU weights w^ECU are "
+            "variable incentive weights used for agent payouts and Orchestrator updates."
         )
 
         # Load defaults from ecu module
@@ -348,7 +348,7 @@ with main_col:
                 st.session_state.ecu_dimensions = saved["dimensions"]
             else:
                 st.session_state.ecu_dimensions = [
-                    {"name": d["name"], "label": d["label"], "weight": 1.0}
+                    {"name": d["name"], "label": d["label"], "weight": 1.0, "sw_weight": 1.0}
                     for d in DEFAULT_DIMENSIONS
                 ]
         if "ecu_enabled" not in st.session_state:
@@ -401,24 +401,71 @@ with main_col:
                 help="Agents also score themselves. Self-score contributes with weight λ=0.5.",
             )
 
+            st.divider()
+            st.markdown("**Orchestrator (Social Welfare)**")
+            st.caption(
+                "The Orchestrator adjusts only the ECU incentive weights w^ECU. "
+                "Social welfare is computed with fixed SW weights w^SW."
+            )
+
+            if "ecu_orchestrator_enabled" not in st.session_state:
+                st.session_state.ecu_orchestrator_enabled = st.session_state.experiment_config.get("ecu", {}).get("orchestrator_enabled", False)
+            if "ecu_orchestrator_step_size" not in st.session_state:
+                st.session_state.ecu_orchestrator_step_size = float(st.session_state.experiment_config.get("ecu", {}).get("orchestrator_step_size", 0.1))
+            if "ecu_orchestrator_every" not in st.session_state:
+                st.session_state.ecu_orchestrator_every = int(st.session_state.experiment_config.get("ecu", {}).get("orchestrator_every", 2))
+
+            st.session_state.ecu_orchestrator_enabled = st.toggle(
+                "Enable Orchestrator weight-updating",
+                value=st.session_state.ecu_orchestrator_enabled,
+                help="When enabled, the Orchestrator adjusts dimension weights every K rounds to maximise social welfare.",
+            )
+            if st.session_state.ecu_orchestrator_enabled:
+                oc1, oc2 = st.columns(2)
+                with oc1:
+                    st.session_state.ecu_orchestrator_step_size = st.number_input(
+                        "Step size ε", min_value=0.01, max_value=1.0,
+                        value=st.session_state.ecu_orchestrator_step_size,
+                        step=0.05,
+                        help="How much each weight is perturbed per update step.",
+                    )
+                with oc2:
+                    st.session_state.ecu_orchestrator_every = st.number_input(
+                        "Update every K rounds", min_value=1, max_value=10,
+                        value=st.session_state.ecu_orchestrator_every,
+                        step=1,
+                        help="Orchestrator runs after every K rounds.",
+                    )
+
             st.markdown("**Dimensions and weights**")
             dims = st.session_state.ecu_dimensions
-            for i, dim in enumerate(dims):
-                c1, c2 = st.columns([2, 1])
+            for dim in dims:
+                dim.setdefault("sw_weight", 1.0)
+                c1, c2, c3 = st.columns([2, 1, 1])
                 with c1:
                     st.markdown(f"**{dim['label']}** (`{dim['name']}`)")
                 with c2:
+                    dim["sw_weight"] = st.number_input(
+                        "SW weight",
+                        min_value=0.0, max_value=10.0,
+                        value=float(dim.get("sw_weight", 1.0)),
+                        step=0.1,
+                        key=f"sw_w_{dim['name']}",
+                        help="Fixed social-planner valuation w^SW_q.",
+                    )
+                with c3:
                     dim["weight"] = st.number_input(
-                        "Weight",
+                        "ECU weight",
                         min_value=0.0, max_value=10.0,
                         value=float(dim.get("weight", 1.0)),
                         step=0.1,
                         key=f"ecu_w_{dim['name']}",
-                        label_visibility="collapsed",
+                        help="Variable incentive weight w^ECU_q used for ECU payouts.",
                     )
 
-            total_w = sum(d["weight"] for d in dims)
-            st.caption(f"Total weight: {total_w:.1f}")
+            total_sw = sum(float(d.get("sw_weight", 1.0)) for d in dims)
+            total_ecu = sum(float(d.get("weight", 1.0)) for d in dims)
+            st.caption(f"Total SW weight: {total_sw:.1f} · Total ECU weight: {total_ecu:.1f}")
 
         # Persist to experiment_config
         st.session_state.experiment_config["ecu"] = {
@@ -426,6 +473,9 @@ with main_col:
             "info_condition": st.session_state.get("ecu_info_condition", "opaque"),
             "include_self_assessment": st.session_state.get("ecu_self_assessment", False),
             "coalition_threshold": st.session_state.get("ecu_coalition_threshold", 0.6),
+            "orchestrator_enabled": st.session_state.get("ecu_orchestrator_enabled", False),
+            "orchestrator_step_size": st.session_state.get("ecu_orchestrator_step_size", 0.1),
+            "orchestrator_every": st.session_state.get("ecu_orchestrator_every", 2),
             "dimensions": st.session_state.ecu_dimensions,
         }
 

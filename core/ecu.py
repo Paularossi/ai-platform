@@ -12,8 +12,15 @@ Components
   dimensions and report a coalition agreement score (0-1) per peer.
   Returns a list of PeerReviewOutput objects.
 
-  Ecu formula (eq. 1 in simulation section):
-    ecu_i = sum_q  w_q * (1/(n-1)) * sum_{j≠i} s_{ji}(q)
+  ECU formula:
+    ecu_i = sum_q  w_q^ECU * (1/(n-1)) * sum_{j≠i} s_{ji}(q)
+
+  Social welfare formula:
+    SW = sum_q w_q^SW * (1/n) * sum_i (1/(n-1)) * sum_{j≠i} s_{ji}(q)
+
+  The SW weights are fixed social-planner valuations. The ECU weights are
+  variable Orchestrator incentives and are the only weights updated by the
+  Orchestrator.
 
   If self-assessment is enabled, self-scores are included with weight λ:
     ecu_i = sum_q  w_q * [ λ*s_{ii}(q) + (1/(n-1))*sum_{j≠i} s_{ji}(q) ] / (1 + λ)
@@ -458,7 +465,10 @@ class TurnRecord:
     peer_scores: dict[str, dict[str, float]]  # {reviewer: {dim: score}}
     self_scores: dict[str, float] | None
     aggregated_scores: dict[str, float]        # mean per dimension
-    weights: dict[str, float]
+    weights: dict[str, float]                  # legacy alias: ECU weights
+    ecu_weights: dict[str, float]
+    sw_weights: dict[str, float]
+    social_welfare: float | None
     ecu_earned: float
     contribution_preview: str
 
@@ -471,6 +481,9 @@ class TurnRecord:
             "self_scores": self.self_scores,
             "aggregated_scores": {k: round(v, 4) for k, v in self.aggregated_scores.items()},
             "weights": self.weights,
+            "ecu_weights": self.ecu_weights,
+            "sw_weights": self.sw_weights,
+            "social_welfare": None if self.social_welfare is None else round(self.social_welfare, 4),
             "ecu_earned": round(self.ecu_earned, 4),
             "contribution_preview": self.contribution_preview,
         }
@@ -485,7 +498,11 @@ class EcuLedger:
     agent_names : list[str]
     dimensions : list[dict]
     weights : dict[str, float]
-        Initial weight vector w.
+        Backward-compatible alias for initial ECU weight vector w^ECU.
+    ecu_weights : dict[str, float]
+        Variable Orchestrator incentive weights w^ECU used for ECU payouts.
+    sw_weights : dict[str, float]
+        Fixed social-planner valuation weights w^SW used for social welfare.
     include_self_assessment : bool
         If True, self-scores contribute with weight lambda_self.
     lambda_self : float
@@ -497,6 +514,8 @@ class EcuLedger:
         agent_names: list[str],
         dimensions: list[dict] | None = None,
         weights: dict[str, float] | None = None,
+        ecu_weights: dict[str, float] | None = None,
+        sw_weights: dict[str, float] | None = None,
         include_self_assessment: bool = False,
         lambda_self: float = 0.5,
     ):
@@ -505,12 +524,24 @@ class EcuLedger:
         self.include_self_assessment = include_self_assessment
         self.lambda_self = lambda_self
 
-        self.weights: dict[str, float] = {d["name"]: 1.0 for d in self.dimensions}
+        default_weights = {d["name"]: 1.0 for d in self.dimensions}
+
+        # w^ECU: variable incentive weights. `weights` is kept as a legacy alias.
+        self.ecu_weights: dict[str, float] = dict(default_weights)
         if weights:
-            self.weights.update(weights)
+            self.ecu_weights.update(weights)
+        if ecu_weights:
+            self.ecu_weights.update(ecu_weights)
+
+        # w^SW: fixed social-planner valuation weights. These are not updated
+        # by the Orchestrator.
+        self.sw_weights: dict[str, float] = dict(default_weights)
+        if sw_weights:
+            self.sw_weights.update(sw_weights)
 
         self._balances: dict[str, float] = {name: 0.0 for name in agent_names}
         self._history: list[TurnRecord] = []
+        self._social_welfare_history: list[dict[str, Any]] = []
 
     def record_from_reviews(
         self,
@@ -523,8 +554,8 @@ class EcuLedger:
         """
         Compute and record ecu for agent_name from a round's peer review outputs.
 
-        Implements eq. (1) from the simulation section:
-            ecu_i = sum_q w_q * mean_peer_score_q(i)
+        Implements the ECU formula:
+            ecu_i = sum_q w_q^ECU * mean_peer_score_q(i)
 
         With optional self-assessment (eq. weighted):
             ecu_i = sum_q w_q * [λ*s_ii(q) + mean_peer_q(i)] / (1 + λ)
@@ -559,8 +590,10 @@ class EcuLedger:
             else:
                 agg[dim] = peer_mean
 
-        # ECU = weighted sum of aggregated scores
-        ecu = sum(agg.get(d, 0.0) * self.weights.get(d, 1.0) for d in self.dim_names)
+        # ECU_i^(t) = Σ_q w_q^ECU · (1/(n-1))Σ_{j≠i}s_ji^(t)(q)
+        ecu = sum(agg.get(d, 0.0) * self.ecu_weights.get(d, 1.0) for d in self.dim_names)
+
+        sw = self.compute_social_welfare(reviews)
 
         self._balances[agent_name] = self._balances.get(agent_name, 0.0) + ecu
 
@@ -576,16 +609,65 @@ class EcuLedger:
             peer_scores=peer_scores,
             self_scores=self_scores,
             aggregated_scores=agg,
-            weights=dict(self.weights),
+            weights=dict(self.ecu_weights),
+            ecu_weights=dict(self.ecu_weights),
+            sw_weights=dict(self.sw_weights),
+            social_welfare=sw,
             ecu_earned=ecu,
             contribution_preview=contrib_str[:120],
         ))
 
         return ecu
 
+    @property
+    def weights(self) -> dict[str, float]:
+        """Backward-compatible alias for variable ECU weights w^ECU."""
+        return self.ecu_weights
+
     def update_weights(self, new_weights: dict[str, float]) -> None:
-        """Update weight vector w. Called by Orchestrator local search."""
-        self.weights.update(new_weights)
+        """Update variable ECU incentive weights w^ECU."""
+        self.ecu_weights.update(new_weights)
+
+    def update_ecu_weights(self, new_weights: dict[str, float]) -> None:
+        """Explicit alias for updating w^ECU."""
+        self.update_weights(new_weights)
+
+    def update_sw_weights(self, new_weights: dict[str, float]) -> None:
+        """Update fixed SW valuation weights manually; the Orchestrator should not call this."""
+        self.sw_weights.update(new_weights)
+
+    def mean_peer_scores(self, reviews: list[PeerReviewOutput]) -> dict[str, float]:
+        """
+        Compute s̄_q^(t) = (1/n)Σ_i (1/(n-1))Σ_{j≠i}s_ji^(t)(q).
+
+        This is the mean peer score for each dimension across all reviewed
+        agents and reviewers in a round.
+        """
+        by_dim: dict[str, list[float]] = {d: [] for d in self.dim_names}
+        for review in reviews:
+            for dim_scores in review.scores.values():
+                for dim in self.dim_names:
+                    if dim in dim_scores:
+                        by_dim[dim].append(float(dim_scores[dim]))
+        return {dim: (sum(vals) / len(vals) if vals else 0.0) for dim, vals in by_dim.items()}
+
+    def compute_social_welfare(self, reviews: list[PeerReviewOutput]) -> float:
+        """Compute SW^(t) = Σ_q w_q^SW · s̄_q^(t)."""
+        means = self.mean_peer_scores(reviews)
+        return sum(self.sw_weights.get(dim, 1.0) * means.get(dim, 0.0) for dim in self.dim_names)
+
+    def record_social_welfare(self, cycle: int, reviews: list[PeerReviewOutput]) -> float:
+        """Compute and store social welfare for one round."""
+        means = self.mean_peer_scores(reviews)
+        sw = sum(self.sw_weights.get(dim, 1.0) * means.get(dim, 0.0) for dim in self.dim_names)
+        self._social_welfare_history.append({
+            "cycle": cycle,
+            "mean_peer_scores": {k: round(v, 4) for k, v in means.items()},
+            "sw_weights": dict(self.sw_weights),
+            "ecu_weights": dict(self.ecu_weights),
+            "social_welfare": round(sw, 4),
+        })
+        return sw
 
     @property
     def balances(self) -> dict[str, float]:
@@ -598,6 +680,10 @@ class EcuLedger:
     def balance_for(self, agent_name: str) -> float:
         return self._balances.get(agent_name, 0.0)
 
+    @property
+    def social_welfare_history(self) -> list[dict[str, Any]]:
+        return list(self._social_welfare_history)
+
     def scores_by_dimension(self) -> dict[str, list[float]]:
         result: dict[str, list[float]] = {d: [] for d in self.dim_names}
         for rec in self._history:
@@ -608,7 +694,10 @@ class EcuLedger:
 
     def to_dict(self) -> dict:
         return {
-            "weights": self.weights,
+            "weights": self.ecu_weights,
+            "ecu_weights": self.ecu_weights,
+            "sw_weights": self.sw_weights,
             "balances": {k: round(v, 4) for k, v in self._balances.items()},
+            "social_welfare_history": self.social_welfare_history,
             "history": [r.to_dict() for r in self._history],
         }

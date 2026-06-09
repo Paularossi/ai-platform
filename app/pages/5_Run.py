@@ -29,6 +29,7 @@ from core.agent import Agent
 from core.hub import CommunicationHub
 from core.protocols.gossip import GossipProtocol
 from core.protocols.crowd import CrowdProtocol
+from core.orchestrator import Orchestrator
 from core.ecu import EcuLedger, PeerReviewRound, CoalitionTracker, DEFAULT_DIMENSIONS
 
 st.set_page_config(page_title="Run Experiment", page_icon="🚀", layout="wide")
@@ -59,16 +60,17 @@ def build_agents(cfg: dict) -> list[Agent]:
 
 
 def build_protocol(agents: list[Agent], cfg: dict, dry_run: bool,
-                   peer_reviewer=None, coalition_tracker=None):
+                   peer_reviewer=None, coalition_tracker=None, orchestrator=None):
     """Return the correct protocol instance based on the configured setting."""
     setting = cfg.get("protocol", {}).get("setting", "Simultaneous")
-    # Support both new names and legacy names from saved configs
     if setting in ("Simultaneous", "Crowd (parallel)"):
         return CrowdProtocol(agents, cfg, peer_reviewer=peer_reviewer,
-                             coalition_tracker=coalition_tracker, dry_run=dry_run)
+                             coalition_tracker=coalition_tracker,
+                             orchestrator=orchestrator, dry_run=dry_run)
     elif setting in ("Sequential", "Gossip (sequential)"):
         return GossipProtocol(agents, cfg, peer_reviewer=peer_reviewer,
-                              coalition_tracker=coalition_tracker, dry_run=dry_run)
+                              coalition_tracker=coalition_tracker,
+                              orchestrator=orchestrator, dry_run=dry_run)
     raise ValueError(f"Unknown protocol setting: '{setting}'")
 
 
@@ -251,7 +253,7 @@ def _show_results(results: list[dict], experiment_cfg: dict) -> None:
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
     exp_name = experiment_cfg.get("overview", {}).get("name", "experiment").replace(" ", "_").lower()
 
-    dl1, dl2, dl3 = st.columns(3)
+    dl1, dl2 = st.columns(2)
     with dl1:
         csv_bytes = results_df.to_csv(index=False).encode()
         st.download_button(
@@ -269,21 +271,7 @@ def _show_results(results: list[dict], experiment_cfg: dict) -> None:
             file_name=f"{exp_name}_{timestamp}_log.json",
             mime="application/json",
             use_container_width=True,
-        )
-    with dl3:
-        # Prompt log: extract prompt_log from all results
-        prompt_entries = []
-        for r in results:
-            for entry in r.get("prompt_log", []):
-                prompt_entries.append({"item_id": r["item_id"], **entry})
-        prompt_json = json.dumps(prompt_entries, indent=2, ensure_ascii=False, default=str)
-        st.download_button(
-            "⬇ Prompt log JSON",
-            data=prompt_json.encode(),
-            file_name=f"{exp_name}_{timestamp}_prompts.json",
-            mime="application/json",
-            use_container_width=True,
-            help="All prompts and responses sent/received — for verifying information visibility settings.",
+            help="Includes contributions, peer reviews, ECU history, Orchestrator updates, and all prompts.",
         )
 
 
@@ -430,26 +418,36 @@ for item_idx, row in subset.iterrows():
     image_path = resolve_image_path(item_id, dataset_cfg, None)
     item_data = build_item_data(row, column_mapping, image_path)
 
-    # Build a fresh ledger and coalition tracker per item
+    # Build a fresh ledger, coalition tracker, and orchestrator per item
     item_ledger: EcuLedger | None = None
     item_coalition: CoalitionTracker | None = None
+    item_orchestrator: Orchestrator | None = None
     if ecu_enabled and peer_reviewer:
         dim_configs = ecu_cfg.get("dimensions") or DEFAULT_DIMENSIONS
-        weights = {d["name"]: float(d.get("weight", 1.0)) for d in dim_configs}
-        active_dims = [d for d in DEFAULT_DIMENSIONS if d["name"] in weights]
+        ecu_weights = {d["name"]: float(d.get("weight", 1.0)) for d in dim_configs}
+        sw_weights = {d["name"]: float(d.get("sw_weight", 1.0)) for d in dim_configs}
+        active_dims = [d for d in DEFAULT_DIMENSIONS if d["name"] in ecu_weights]
         item_ledger = EcuLedger(
             agent_names=agent_names,
             dimensions=active_dims,
-            weights=weights,
+            ecu_weights=ecu_weights,
+            sw_weights=sw_weights,
             include_self_assessment=include_self_assessment,
         )
         item_coalition = CoalitionTracker(threshold=coalition_threshold)
+        if ecu_cfg.get("orchestrator_enabled", False):
+            item_orchestrator = Orchestrator(
+                step_size=float(ecu_cfg.get("orchestrator_step_size", 0.1)),
+                update_every=int(ecu_cfg.get("orchestrator_every", 2)),
+                enabled=True,
+            )
 
-    # Build protocol fresh per item (coalition tracker is per-item)
+    # Build protocol fresh per item
     protocol = build_protocol(
         agents, cfg, dry_run=dry_run,
         peer_reviewer=peer_reviewer,
         coalition_tracker=item_coalition,
+        orchestrator=item_orchestrator,
     )
 
     # Create hub for this item
@@ -518,15 +516,10 @@ for item_idx, row in subset.iterrows():
                 if packet.visible_history:
                     lines.append(f"**Visible history** ({len(packet.visible_history)} entry/entries):")
                     for h in packet.visible_history:
-                        if h.is_classification:
-                            h_str = "  ,  ".join(f"`{k}`: {v}" for k, v in h.labels.items())
-                        else:
-                            h_str = str(h.contribution)[:120]
-                        real_pros = [p for p in h.pros if p not in ("[dry-run]", "[dry-run placeholder]")]
-                        pros_note = f"  \n  *{real_pros[0]}*" if real_pros else ""
-                        lines.append(f"- Cycle {h.cycle + 1} · **{h.agent_name}**: {h_str}{pros_note}")
+                        h_str = str(h.contribution)[:120] if h.contribution else "(none)"
+                        lines.append(f"- Round {h.cycle + 1} · **{h.agent_name}**: {h_str}")
                 else:
-                    lines.append(f"**Visible history:** *(none — visibility mode: {visibility_mode})*")
+                    lines.append(f"**Visible history:** *(none — {visibility_mode})*")
 
                 entries.append("\n\n".join(lines))
 
@@ -536,56 +529,11 @@ for item_idx, row in subset.iterrows():
                 changed_fields = [f for f, c in output.changed.items() if c]
                 change_note = f"✏️ revised: {', '.join(changed_fields)}" if changed_fields else "✔ no changes"
 
-                lines = [f"#### 📨 **{event.agent_name}** → Hub  ·  {change_note}"]
-
-                if output.is_classification:
-                    label_str = "  ,  ".join(
-                        f"`{k}`: {v}" for k, v in output.labels.items()
-                    ) if output.labels else "*(no labels parsed)*"
-                    lines.append(f"**Answers:** {label_str}")
-                    if output.prob_distribution:
-                        for fname, probs in output.prob_distribution.items():
-                            conf_str = f"  *(confidence: {output.confidence:.2f})*" if output.confidence is not None else ""
-                            prob_parts = ", ".join(f"{code}={p:.2f}" for code, p in probs.items())
-                            lines.append(f"**{fname} distribution:** {prob_parts}{conf_str}")
-                else:
-                    contrib = str(output.contribution) if output.contribution else "*(empty)*"
-                    lines.append(f"**Contribution:** {contrib}")
-                    if output.confidence is not None:
-                        lines.append(f"**Confidence:** {output.confidence:.2f}")
-
-                if output.pros:
-                    real_pros = [p for p in output.pros if p not in ("[dry-run]", "[dry-run placeholder]")]
-                    if real_pros:
-                        lines.append("**Pros:** " + " · ".join(f"_{p}_" for p in real_pros))
-                if output.cons:
-                    real_cons = [c for c in output.cons if c not in ("[dry-run]", "[dry-run placeholder]")]
-                    if real_cons:
-                        lines.append("**Cons:** " + " · ".join(f"_{c}_" for c in real_cons))
-
+                lines = [f"#### 📨 **{event.agent_name}** → Hub  ·  Round {event.cycle + 1}  ·  {change_note}"]
+                contrib = str(output.contribution) if output.contribution else "*(empty)*"
+                lines.append(f"**Contribution:** {contrib}")
                 if not output.contribution and output.raw_response and not output.raw_response.startswith("[dry-run"):
                     lines.append(f"⚠️ **Raw response (parse failed):**\n```\n{output.raw_response}\n```")
-
-                entries.append("\n\n".join(lines))
-
-            elif event.kind == "aggregate":
-                # ── Round aggregate (Crowd protocol) ─────────────────────
-                output = event.output
-                if output.is_classification and output.labels:
-                    label_str = "  ,  ".join(f"`{k}`: {v}" for k, v in output.labels.items())
-                else:
-                    label_str = "*(no consensus)*"
-
-                lines = [f"#### 🗳️ Round {event.cycle + 1} aggregate"]
-                lines.append(f"**Result:** {label_str}")
-
-                if output.prob_distribution:
-                    for fname, dist in output.prob_distribution.items():
-                        vote_parts = ", ".join(
-                            f"{code}: {p*100:.0f}%" for code, p in dist.items()
-                        )
-                        lines.append(f"**{fname} votes:** {vote_parts}")
-
                 entries.append("\n\n".join(lines))
 
             elif event.kind == "peer_review":
@@ -608,24 +556,47 @@ for item_idx, row in subset.iterrows():
                     entries.append("\n\n".join(lines))
 
             elif event.kind == "ecu_update":
-                # ── ECU balances updated after full peer review round ─────
                 balances = hub.ecu_balances
-                if balances:
-                    lines = [f"#### 💰 ECU update  ·  after Cycle {event.cycle + 1}"]
-                    bal_str = "  ·  ".join(
-                        f"**{name}**: {bal:.3f}" for name, bal in balances.items()
-                    )
-                    lines.append(f"Cumulative balances: {bal_str}")
+                lines = [f"#### 💰 ECU update  ·  after Round {event.cycle + 1}"]
 
-                    # Show coalition if available
-                    if item_coalition and item_coalition.history:
-                        last_coalition = item_coalition.history[-1]
-                        c = last_coalition.get("coalition", [])
-                        lines.append(
-                            f"Coalition (τ={coalition_threshold}): "
-                            + (f"**{', '.join(c)}**" if c else "*(none)*")
-                        )
-                    entries.append("\n\n".join(lines))
+                if item_ledger:
+                    round_records = [r for r in item_ledger.history if r.cycle == event.cycle]
+                    if round_records:
+                        lines.append("**This round's scores (peer-averaged):**")
+                        for rec in round_records:
+                            score_str = "  ,  ".join(f"{d}: {s:.2f}" for d, s in rec.aggregated_scores.items())
+                            lines.append(f"→ **{rec.agent_name}**: {score_str}  →  **+{rec.ecu_earned:.3f} ecus**")
+
+                if balances:
+                    bal_str = "  ·  ".join(f"**{n}**: {b:.3f}" for n, b in balances.items())
+                    lines.append(f"**Cumulative balances:** {bal_str}")
+
+                if item_coalition and item_coalition.history:
+                    last_c = item_coalition.history[-1]
+                    c = last_c.get("coalition", [])
+                    lines.append(
+                        f"**Coalition** (τ={coalition_threshold}): "
+                        + (f"**{', '.join(c)}**" if c else "*(none above threshold)*")
+                    )
+
+                if item_orchestrator:
+                    cycle_updates = [u for u in item_orchestrator.history if u.cycle == event.cycle]
+                    ran_this_cycle = (event.cycle + 1) % item_orchestrator.update_every == 0
+                    if cycle_updates:
+                        lines.append("**Orchestrator weight updates:**")
+                        for u in cycle_updates:
+                            lines.append(
+                                f"→ {u.dimension}: {u.old_weight:.2f} → **{u.new_weight:.2f}** "
+                                f"(SW: {u.sw_before:.3f} → {u.sw_after:.3f})"
+                            )
+                        # Show current full weight vector after updates
+                        current_w = {k: round(v, 3) for k, v in item_ledger.ecu_weights.items()}
+                        w_str = "  ,  ".join(f"{k}={v}" for k, v in current_w.items())
+                        lines.append(f"Updated ECU weights: {w_str}")
+                    elif ran_this_cycle:
+                        lines.append("**Orchestrator:** ran — no weight improvement found (already near-optimal for this round).")
+
+                entries.append("\n\n".join(lines))
 
             # Re-render the full feed after every event
             feed.markdown("\n\n---\n\n".join(entries))
@@ -640,6 +611,28 @@ for item_idx, row in subset.iterrows():
             for col, (name, bal) in zip(bal_cols, hub.ecu_balances.items()):
                 col.metric(name, f"{bal:.3f} ecus")
 
+        # Orchestrator weight trajectory (debug)
+        if item_orchestrator and item_orchestrator.history:
+            with st.expander("📊 Orchestrator weight trajectory", expanded=False):
+                if item_ledger and item_ledger.social_welfare_history:
+                    st.markdown("**Social welfare trajectory**")
+                    st.dataframe(pd.DataFrame(item_ledger.social_welfare_history), hide_index=True, use_container_width=True)
+                rows = []
+                for u in item_orchestrator.history:
+                    rows.append({
+                        "Round": u.cycle + 1,
+                        "Dimension": u.dimension,
+                        "Old weight": round(u.old_weight, 3),
+                        "New weight": round(u.new_weight, 3),
+                        "Direction": u.direction,
+                        "SW before": round(u.sw_before, 4),
+                        "SW after": round(u.sw_after, 4),
+                    })
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                st.caption(
+                    "Only ECU incentive weights w^ECU are updated. SW weights w^SW stay fixed."
+                )
+
     # Store result
     result = {
         "item_id": item_id,
@@ -647,6 +640,9 @@ for item_idx, row in subset.iterrows():
         "originator_name": hub.originator_name,
         "ecu_balances": hub.ecu_balances,
         "coalition_history": item_coalition.to_dict() if item_coalition else {},
+        "orchestrator": item_orchestrator.to_dict() if item_orchestrator else {},
+        "ecu_ledger": item_ledger.to_dict() if item_ledger else {},
+        "social_welfare_history": item_ledger.social_welfare_history if item_ledger else [],
         "log": [o.to_dict() for o in hub.log],
         "peer_review_log": [p.to_dict() for p in hub.peer_review_log],
         "prompt_log": hub.prompt_log,

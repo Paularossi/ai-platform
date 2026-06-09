@@ -51,12 +51,14 @@ class GossipProtocol:
         experiment_config: dict[str, Any],
         peer_reviewer: Any | None = None,
         coalition_tracker: Any | None = None,
+        orchestrator: Any | None = None,
         dry_run: bool = False,
     ):
         self.agents = agents
         self.dry_run = dry_run
         self.peer_reviewer = peer_reviewer
         self.coalition_tracker = coalition_tracker
+        self.orchestrator = orchestrator
 
         protocol = experiment_config.get("protocol", {})
         self.max_cycles: int = int(protocol.get("max_cycles", 5))
@@ -188,18 +190,20 @@ class GossipProtocol:
                 packet=ref_packet,
             )
 
+        round_reviews = [r for r in hub.peer_review_log if r.cycle == cycle_idx]
+        if self.coalition_tracker:
+            self.coalition_tracker.find_coalition(round_reviews)
+
         if hub.ledger:
             hub.compute_ecus_for_round(cycle_idx)
+            if self.orchestrator:
+                self.orchestrator.step(cycle_idx, round_reviews, hub.ledger)
             yield RunEvent(
                 kind="ecu_update",
                 cycle=cycle_idx,
                 agent_name="__all__",
                 packet=ref_packet,
             )
-
-        if self.coalition_tracker:
-            round_reviews = [r for r in hub.peer_review_log if r.cycle == cycle_idx]
-            self.coalition_tracker.find_coalition(round_reviews)
 
     def _build_agent_order(self, randomize: bool = False) -> list[Agent]:
         agents = list(self.agents)

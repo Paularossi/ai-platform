@@ -118,18 +118,32 @@ with main_col:
         c2.markdown(f"**Max cycles**\n\n{val(proto.get('max_cycles'))}")
         c3.markdown(f"**Stopping rule**\n\n{val(proto.get('stopping_rule'))}")
 
-        c1, c2 = st.columns(2)
-        c1.markdown(f"**Visibility**\n\n{val(proto.get('visibility_mode'))}")
-        c2.markdown(f"**Order**\n\n{val(proto.get('order_type'))}")
+        c1, c2, c3 = st.columns(3)
+        c1.markdown(f"**φ₁ Visibility**\n\n{val(proto.get('visibility_mode'))}")
+        c2.markdown(f"**φ₂ Review depth**\n\n{val(proto.get('review_depth'))}")
+        c3.markdown(f"**Order**\n\n{val(proto.get('order_type'))}")
 
         ecu = draft["ecu"]
         if ecu.get("enabled"):
             st.divider()
-            st.markdown("**ECU / peer review:** ✅ enabled")
-            c1, c2, c3 = st.columns(3)
-            c1.markdown(f"**Info condition**\n\n{val(ecu.get('info_condition'))}")
-            c2.markdown(f"**Self-assessment**\n\n{'Yes' if ecu.get('include_self_assessment') else 'No'}")
-            c3.markdown(f"**Coalition τ**\n\n{val(ecu.get('coalition_threshold'))}")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.markdown(f"**ECU**\n\n✅ enabled")
+            c2.markdown(f"**T/S/O**\n\n{val(ecu.get('info_condition'))}")
+            c3.markdown(f"**Self-assessment**\n\n{'Yes' if ecu.get('include_self_assessment') else 'No'}")
+            c4.markdown(f"**Coalition τ**\n\n{val(ecu.get('coalition_threshold'))}")
+            if ecu.get("orchestrator_enabled"):
+                st.markdown(
+                    f"**Orchestrator:** ✅ enabled  ·  "
+                    f"ε={ecu.get('orchestrator_step_size', 0.1)}  ·  "
+                    f"every {ecu.get('orchestrator_every', 2)} rounds"
+                )
+            dims = ecu.get("dimensions", [])
+            if dims:
+                dim_str = "  ·  ".join(
+                    f"{d['label']}: SW={d.get('sw_weight', 1.0)}, ECU={d.get('weight', 1.0)}"
+                    for d in dims
+                )
+                st.caption(f"Weights: {dim_str}")
         else:
             st.divider()
             st.markdown("**ECU / peer review:** ❌ disabled")
@@ -143,14 +157,26 @@ with main_col:
                 with cols[i % 3]:
                     with st.container(border=True):
                         st.markdown(f"**{agent.get('name', f'Agent {i+1}')}**")
-                        raw_role = agent.get("role", "")
+                        st.caption(f"`{agent.get('provider', '?')}` / `{agent.get('model', '?')}`")
                         custom_role = agent.get("custom_role", "").strip()
-                        display_role = custom_role if raw_role == "Custom" and custom_role else raw_role
-                        st.caption(display_role)
-                        st.markdown(f"`{agent.get('model', '?')}`")
+                        if custom_role:
+                            st.caption(custom_role)
                         override = draft["agent_prompt_overrides"].get(agent.get("name", ""), "")
                         if override.strip():
                             st.caption("✏️ Has prompt override")
+
+    with st.container(border=True):
+        st.subheader("3. Instructions")
+        instructions = draft["instructions"]
+        base = instructions.get("base_instructions", "").strip()
+        notes = instructions.get("guideline_notes", "").strip()
+        if base:
+            st.markdown("**Base instructions:**")
+            st.caption(base[:300] + ("..." if len(base) > 300 else ""))
+        else:
+            st.warning("No base instructions set.")
+        if notes:
+            st.caption(f"Guideline notes: {notes[:150]}")
 
     st.divider()
     nav1, _, nav3 = st.columns([2, 2, 2])

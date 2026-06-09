@@ -32,14 +32,6 @@ class AgentOutput:
         0-indexed round number.
     contribution : Any
         str for deliberation tasks, dict[field→verdict] for classification.
-    prob_distribution : dict[str, dict[str, float]]
-        Per-field probability distribution (classification only).
-    confidence : float | None
-        Overall confidence in [0, 1].
-    pros : list[str]
-        Arguments supporting the contribution.
-    cons : list[str]
-        Arguments against or alternative readings.
     changed : dict[str, bool]
         Per-field change flags vs previous state (set by hub).
     ecu_scores : dict[str, float]
@@ -52,10 +44,6 @@ class AgentOutput:
     agent_name: str
     cycle: int
     contribution: Any = None
-    prob_distribution: dict[str, dict[str, float]] = field(default_factory=dict)
-    confidence: float | None = None
-    pros: list[str] = field(default_factory=list)
-    cons: list[str] = field(default_factory=list)
     changed: dict[str, bool] = field(default_factory=dict)
     ecu_scores: dict[str, float] = field(default_factory=dict)
     ecu_earned: float | None = None
@@ -75,10 +63,6 @@ class AgentOutput:
             "agent_name": self.agent_name,
             "cycle": self.cycle,
             "contribution": self.contribution,
-            "prob_distribution": self.prob_distribution,
-            "confidence": self.confidence,
-            "pros": self.pros,
-            "cons": self.cons,
             "changed": self.changed,
             "ecu_scores": self.ecu_scores,
             "ecu_earned": self.ecu_earned,

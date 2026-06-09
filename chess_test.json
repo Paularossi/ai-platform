@@ -1,0 +1,97 @@
+{
+  "meta": {
+    "saved_at": "2026-06-09T10:22:42.369000Z",
+    "app_version": "0.1"
+  },
+  "overview": {
+    "name": "chess",
+    "author": "paula",
+    "protocol_id": "0.1"
+  },
+  "task": {
+    "description": "Who is the greatest chess player of all times?"
+  },
+  "instructions": {
+    "base_instructions": "You are a chess enthusiast participating in a structured deliberation.\nWrite exactly one paragraph (50-150 words) arguing from your assigned perspective.",
+    "guideline_notes": ""
+  },
+  "agent_prompt_overrides": {
+    "Male fan": "",
+    "Female fan": ""
+  },
+  "agents": [
+    {
+      "name": "Male fan",
+      "provider": "OpenAI",
+      "model": "gpt-4o",
+      "role": "Custom",
+      "custom_role": "You believe chess is a male-dominated sport, but you are willing to argue."
+    },
+    {
+      "name": "Female fan",
+      "provider": "OpenAI",
+      "model": "gpt-4o",
+      "role": "Custom",
+      "custom_role": "You believe since chess is not a physical sport, there shouldn't be a distinction between males and females in chess, but you are willing to argue."
+    }
+  ],
+  "protocol": {
+    "setting": "Simultaneous",
+    "supervision_mode": "Unsupervised",
+    "visibility_mode": "Previous round",
+    "review_depth": "previous_round",
+    "order_type": "Fixed",
+    "initializer_agent": "Agent 1",
+    "judge_agent": "Agent 3",
+    "max_cycles": 6,
+    "stopping_rule": "Either"
+  },
+  "ecu": {
+    "enabled": true,
+    "info_condition": "transparent",
+    "include_self_assessment": false,
+    "coalition_threshold": 0.7,
+    "orchestrator_enabled": true,
+    "orchestrator_step_size": 0.1,
+    "orchestrator_every": 2,
+    "dimensions": [
+      {
+        "name": "depth_breadth",
+        "label": "Depth-Breadth",
+        "weight": 1.0,
+        "sw_weight": 0.8
+      },
+      {
+        "name": "depth",
+        "label": "Depth",
+        "weight": 1.0,
+        "sw_weight": 0.8
+      },
+      {
+        "name": "clarity",
+        "label": "Clarity",
+        "weight": 1.0,
+        "sw_weight": 0.8
+      },
+      {
+        "name": "completeness",
+        "label": "Completeness",
+        "weight": 1.0,
+        "sw_weight": 0.8
+      },
+      {
+        "name": "consensus",
+        "label": "Consensus",
+        "weight": 1.0,
+        "sw_weight": 1.2
+      }
+    ]
+  },
+  "dataset": {
+    "source": "single_topic",
+    "num_rows": 1,
+    "columns": [
+      "topic"
+    ]
+  }
+}

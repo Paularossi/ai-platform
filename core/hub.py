@@ -67,6 +67,7 @@ class ContextPacket:
     cycle: int
     agent_name: str
     ecu_balances: dict[str, float] = field(default_factory=dict)
+    ecu_weights: dict[str, float] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -141,11 +142,12 @@ class CommunicationHub:
         Called by the protocol just before dispatching to an agent.
         """
         ecu_balances: dict[str, float] = {}
+        ecu_weights: dict[str, float] = {}
         if self.ledger:
             if self.ecu_info_condition == "transparent":
                 ecu_balances = self.ledger.balances
+                ecu_weights = dict(self.ledger.ecu_weights)
             elif self.ecu_info_condition == "semi-transparent":
-                # Only show this agent's own balance
                 own = self.ledger.balance_for(agent_name)
                 ecu_balances = {agent_name: own}
 
@@ -157,6 +159,7 @@ class CommunicationHub:
             cycle=cycle,
             agent_name=agent_name,
             ecu_balances=ecu_balances,
+            ecu_weights=ecu_weights,
         )
 
     def submit(self, output: AgentOutput) -> None:
@@ -370,14 +373,17 @@ class CommunicationHub:
             return ""
 
         balances = self.ledger.balances
-        weights = self.ledger.weights
+        weights = self.ledger.ecu_weights
+        sw_weights = self.ledger.sw_weights
 
         if self.ecu_info_condition == "transparent":
             w_str = ", ".join(f"{k}={v:.2f}" for k, v in weights.items())
+            sw_str = ", ".join(f"{k}={v:.2f}" for k, v in sw_weights.items())
             b_str = ", ".join(f"{k}={v:.3f}" for k, v in balances.items())
             return (
                 f"[ECU update — Round {cycle + 1}] "
-                f"Weights: {w_str}. "
+                f"ECU incentive weights: {w_str}. "
+                f"Fixed SW weights: {sw_str}. "
                 f"All balances: {b_str}."
             )
         elif self.ecu_info_condition == "semi-transparent":

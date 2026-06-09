@@ -250,15 +250,17 @@ def _build_user_message(packet: ContextPacket, questions: list[dict]) -> str:
         # Show ECU balance info based on information condition
         # packet.ecu_balances is populated for both T and S conditions
         if packet.ecu_balances:
-            # Determine what to show based on which agent this is
             own_balance = packet.ecu_balances.get(packet.agent_name)
             if own_balance is not None and len(packet.ecu_balances) == 1:
                 # Semi-transparent: only own balance was passed
                 parts.append(f"Your current ECU balance: {own_balance:.2f}")
             else:
-                # Transparent: all balances
+                # Transparent: all balances + weight vector
                 bal_str = ", ".join(f"{k}: {v:.2f}" for k, v in packet.ecu_balances.items())
                 parts.append(f"Current ECU balances: {bal_str}")
+                if packet.ecu_weights:
+                    w_str = ", ".join(f"{k}={v:.2f}" for k, v in packet.ecu_weights.items())
+                    parts.append(f"Current quality weights: {w_str}")
             parts.append("")
 
         parts.append("=== Your turn ===")
@@ -587,10 +589,6 @@ class Agent:
                 agent_name=self.name,
                 cycle=packet.cycle,
                 contribution=dummy_contribution,
-                prob_distribution=dummy_probs,
-                confidence=dummy_conf,
-                pros=["[dry-run]"],
-                cons=["[dry-run]"],
                 raw_response="[dry-run]",
             )
 
@@ -632,17 +630,11 @@ class Agent:
         except Exception as exc:
             raw_text = f"[ERROR: {exc}]"
 
-        contribution, prob_dist, confidence, pros, cons = _parse_contribution(
-            raw_text, self._questions
-        )
+        contribution, _, _, _, _ = _parse_contribution(raw_text, self._questions)
 
         return AgentOutput(
             agent_name=self.name,
             cycle=packet.cycle,
             contribution=contribution,
-            prob_distribution=prob_dist,
-            confidence=confidence,
-            pros=pros,
-            cons=cons,
             raw_response=raw_text,
         )
