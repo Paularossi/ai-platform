@@ -2,6 +2,9 @@
 
 import json
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_AMS = ZoneInfo("Europe/Amsterdam")
 
 import pandas as pd
 import streamlit as st
@@ -51,7 +54,7 @@ def build_draft() -> dict:
     cfg = st.session_state.get("experiment_config", {})
     ensure_single_topic_dataset(cfg)
     return {
-        "meta": {"saved_at": datetime.utcnow().isoformat() + "Z", "app_version": "0.1"},
+        "meta": {"saved_at": datetime.now(_AMS).isoformat(), "app_version": "0.1"},
         "overview": cfg.get("overview", {
             "name": st.session_state.get("exp_name", ""),
             "author": st.session_state.get("author", ""),
@@ -201,7 +204,7 @@ with action_col:
         st.subheader("Save draft")
         st.caption("Save full configuration as JSON.")
         exp_name = draft["overview"].get("name", "experiment").strip() or "experiment"
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+        timestamp = datetime.now(_AMS).strftime("%Y%m%d_%H%M")
         filename_input = st.text_input(
             "Filename",
             value=f"{exp_name.lower().replace(' ', '_')}_{timestamp}.json",

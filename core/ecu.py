@@ -1,7 +1,7 @@
 """
 core/ecu.py
 
-ECU mechanism — peer review based (OMAS Section 4, meeting update).
+ECU mechanism — peer review based.
 
 Components
 ----------
@@ -76,14 +76,6 @@ DEFAULT_DIMENSIONS: list[dict] = [
         ),
     },
     {
-        "name": "completeness",
-        "label": "Completeness",
-        "rubric": (
-            "Does the contribution adequately address the question? "
-            "0 = incomplete, misses key aspects; 1 = thorough and fully responsive."
-        ),
-    },
-    {
         "name": "consensus",
         "label": "Consensus",
         "rubric": (
@@ -140,6 +132,7 @@ class PeerReviewRound:
         ecu_info: str = "",
         reviewer_role: str = "",
         agent_histories: dict[str, list[str]] | None = None,
+        collect_importance_votes: bool = False,
     ) -> str:
         """
         Build the peer review prompt.
@@ -155,7 +148,14 @@ class PeerReviewRound:
             else [n for n in all_contributions if n != reviewer_name]
 
         dim_names = [d["name"] for d in self.dimensions]
-        has_history = agent_histories and self.review_depth != "current_only"
+        # On cycle 0 there is no previous round — treat as current_only
+        # regardless of review_depth to avoid confusing agents.
+        is_first_round = (cycle == 0)
+        has_history = (
+            agent_histories
+            and self.review_depth != "current_only"
+            and not is_first_round
+        )
         lines: list[str] = []
 
         lines.append(
@@ -168,6 +168,13 @@ class PeerReviewRound:
 
         if ecu_info:
             lines.append(ecu_info)
+            lines.append("")
+
+        if is_first_round:
+            lines.append(
+                "NOTE: This is Round 1. No previous contributions exist. "
+                "Agents are contributing for the first time."
+            )
             lines.append("")
 
         lines.append("Your contribution this round:")
@@ -214,7 +221,7 @@ class PeerReviewRound:
         lines.append("")
 
         lines.append("For each agent, provide:")
-        lines.append("  1. Quality scores on five dimensions (0.00 to 1.00 each).")
+        lines.append(f"  1. Quality scores on {len(self.dimensions)} dimensions (0.00 to 1.00 each).")
         lines.append("  2. A one-sentence justification summarising your overall assessment.")
         if has_history:
             lines.append(
@@ -223,11 +230,30 @@ class PeerReviewRound:
                 "previous round in response to others' arguments. "
                 "0 = no change at all, 1 = substantially updated position."
             )
+        elif is_first_round:
+            lines.append(
+                "For the consensus dimension specifically: "
+                "this is Round 1 — there is no previous contribution to compare against. "
+                "Score instead how constructively this contribution opens dialogue "
+                "and invites agreement. "
+                "0 = purely adversarial or closed; 1 = constructively invites convergence."
+            )
         lines.append("")
         lines.append("Quality dimension rubrics:")
         for d in self.dimensions:
             lines.append(f"  {d['label']} ({d['name']}): {d['rubric']}")
         lines.append("")
+
+        if collect_importance_votes:
+            lines.append(
+                "After scoring all agents, also provide your IMPORTANCE VOTE: "
+                "distribute exactly 100 points across the quality dimensions to reflect "
+                "which dimensions matter most to you, given the topic of the debate and your role. "
+                "You may assign 0 to a dimension if you consider it unimportant. "
+                "The points must sum to exactly 100."
+            )
+            lines.append("")
+
         lines.append("Respond ONLY with a JSON object in this exact format:")
         lines.append("{")
         for name in review_targets:
@@ -236,6 +262,12 @@ class PeerReviewRound:
                 lines.append(f'    "{dim}": <score 0.00-1.00>,')
             lines.append('    "justification": "<one sentence>"')
             lines.append("  },")
+        if collect_importance_votes:
+            lines.append('  "importance_votes": {')
+            for i, dim in enumerate(dim_names):
+                comma = "," if i < len(dim_names) - 1 else ""
+                lines.append(f'    "{dim}": <integer points>{comma}')
+            lines.append("  }")
         lines.append("}")
         lines.append("No other text. No markdown fences.")
         return "\n".join(lines)
@@ -266,7 +298,6 @@ class PeerReviewRound:
                 {d: 0.5 for d in dim_names}
                 if self.include_self_assessment else None
             )
-            # Derive coalition from consensus (dry-run: 0.5)
             return PeerReviewOutput(
                 reviewer_name=reviewer_name,
                 cycle=cycle,
@@ -274,12 +305,14 @@ class PeerReviewRound:
                 self_scores=self_scores,
                 coalition_scores={n: 0.5 for n in all_contributions if n != reviewer_name},
                 coalition_justifications={},
+                importance_votes={},
                 raw_response="[dry-run]",
             )
 
         scores: dict[str, dict[str, float]] = {}
         self_scores: dict[str, float] | None = None
         justifications: dict[str, str] = {}
+        importance_votes: dict[str, float] = {}
 
         try:
             clean = re.sub(r"```[a-z]*\n?", "", raw).strip()
@@ -303,6 +336,18 @@ class PeerReviewRound:
                     scores[name] = dim_scores
                     justifications[name] = str(entry.get("justification", ""))
 
+            # Parse importance votes if present
+            if "importance_votes" in parsed and isinstance(parsed["importance_votes"], dict):
+                raw_votes = parsed["importance_votes"]
+                importance_votes = {
+                    d: max(0.0, float(raw_votes.get(d, 0.0)))
+                    for d in dim_names
+                }
+                total = sum(importance_votes.values())
+                if total > 0:
+                    # Normalise to sum exactly 100
+                    importance_votes = {d: v * 100.0 / total for d, v in importance_votes.items()}
+
         except Exception as exc:
             print(f"[PeerReviewRound] Parse error for {reviewer_name}: {exc}")
             for name in review_targets:
@@ -323,6 +368,7 @@ class PeerReviewRound:
             self_scores=self_scores,
             coalition_scores=coalition,
             coalition_justifications=justifications,
+            importance_votes=importance_votes,
             raw_response=raw,
         )
 
@@ -338,16 +384,14 @@ class PeerReviewRound:
         item_context: str = "",
         ecu_info: str = "",
     ) -> PeerReviewOutput:
-        if self.dry_run:
-            return self.parse(reviewer_name, cycle, "[dry-run]", all_contributions)
 
         prompt = self.build_prompt(
             reviewer_name, reviewer_contribution, all_contributions,
             cycle, item_context, ecu_info,
         )
         try:
-            from openai import OpenAI
-            client = OpenAI()
+            from core.agent import get_openai_client
+            client = get_openai_client()
             response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
@@ -399,8 +443,9 @@ class CoalitionTracker:
 
         best: list[str] = []
 
-        # Enumerate all subsets (n is small, typically 3-4)
-        for size in range(n, 0, -1):
+        # Enumerate all subsets of size ≥ 2 (a coalition requires mutual agreement
+        # between at least two agents; single-agent subsets are meaningless)
+        for size in range(n, 1, -1):
             if size <= len(best):
                 break
             for subset in _subsets(agents, size):
@@ -678,7 +723,32 @@ class EcuLedger:
         return list(self._history)
 
     def balance_for(self, agent_name: str) -> float:
+        """Return the cumulative ECU balance for one agent."""
         return self._balances.get(agent_name, 0.0)
+
+    def last_round_ecu_for(self, agent_name: str) -> float:
+        """
+        Return the ECU earned by an agent in the most recent round.
+
+        Used as a reputation signal: reflects current performance rather than
+        cumulative history, so reputation can rise and fall across rounds.
+        Returns 0.0 if the agent has no recorded history.
+        """
+        agent_records = [r for r in reversed(self._history) if r.agent_name == agent_name]
+        if not agent_records:
+            return 0.0
+        latest_cycle = agent_records[0].cycle
+        cycle_records = [r for r in agent_records if r.cycle == latest_cycle]
+        return sum(r.ecu_earned for r in cycle_records)
+
+    def reputation_scores(self) -> dict[str, float]:
+        """
+        Return {agent_name: last_round_ecu} for all agents.
+
+        Convenience method for passing reputation context into prompts or
+        weighting peer review scores.
+        """
+        return {name: self.last_round_ecu_for(name) for name in self._balances}
 
     @property
     def social_welfare_history(self) -> list[dict[str, Any]]:

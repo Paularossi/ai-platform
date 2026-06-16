@@ -387,11 +387,12 @@ with main_col:
                     ),
                 )
             with c2:
-                st.session_state.ecu_coalition_threshold = st.number_input(
+                st.number_input(
                     "Coalition threshold τ",
                     min_value=0.0, max_value=1.0,
                     value=st.session_state.ecu_coalition_threshold,
                     step=0.05,
+                    key="ecu_coalition_threshold",
                     help="Minimum mutual agreement score for two agents to be in the same coalition.",
                 )
 
@@ -418,24 +419,21 @@ with main_col:
             st.session_state.ecu_orchestrator_enabled = st.toggle(
                 "Enable Orchestrator weight-updating",
                 value=st.session_state.ecu_orchestrator_enabled,
-                help="When enabled, the Orchestrator adjusts dimension weights every K rounds to maximise social welfare.",
+                help=(
+                    "Each round, agents vote on which quality dimensions matter most "
+                    "(given the topic and their role). Their votes guide gradient-ascent "
+                    "updates to the ECU weights w^ECU. Uses a 1/t learning rate — "
+                    "larger updates early, diminishing over time."
+                ),
             )
             if st.session_state.ecu_orchestrator_enabled:
-                oc1, oc2 = st.columns(2)
-                with oc1:
-                    st.session_state.ecu_orchestrator_step_size = st.number_input(
-                        "Step size ε", min_value=0.01, max_value=1.0,
-                        value=st.session_state.ecu_orchestrator_step_size,
-                        step=0.05,
-                        help="How much each weight is perturbed per update step.",
-                    )
-                with oc2:
-                    st.session_state.ecu_orchestrator_every = st.number_input(
-                        "Update every K rounds", min_value=1, max_value=10,
-                        value=st.session_state.ecu_orchestrator_every,
-                        step=1,
-                        help="Orchestrator runs after every K rounds.",
-                    )
+                st.number_input(
+                    "Update every K rounds", min_value=1, max_value=10,
+                    value=st.session_state.ecu_orchestrator_every,
+                    step=1,
+                    key="ecu_orchestrator_every",
+                    help="Collect importance votes and update weights every K rounds (default: 1 = every round).",
+                )
 
             st.markdown("**Dimensions and weights**")
             dims = st.session_state.ecu_dimensions

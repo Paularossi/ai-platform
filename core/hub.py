@@ -238,36 +238,19 @@ class CommunicationHub:
 
         return earned
 
-    def check_convergence(self, field_names: list[str] | None = None) -> bool:
+    def check_convergence(self) -> bool:
         """
-        Return True if all agents' most recent outputs agree.
-        For classification tasks: all agents agree on all (or specified) fields.
-        For deliberation tasks: all agents' contribution strings are identical.
-        Sets self.converged = True if so.
-        Requires every agent to have submitted at least once.
+        Return True if all agents produced identical contributions last cycle.
+        Sets self.converged = True if so. Requires every agent to have submitted.
         """
         latest = self._latest_per_agent()
-
         if set(latest.keys()) != set(self.agent_names):
             return False
-
-        agents = list(latest.keys())
-        ref = latest[agents[0]]
-
-        for agent in agents[1:]:
-            other = latest[agent]
-            # Classification: compare field by field
-            if ref.is_classification and other.is_classification:
-                for fname, val in other.labels.items():
-                    if field_names and fname not in field_names:
-                        continue
-                    if val != ref.labels.get(fname):
-                        return False
-            else:
-                # Deliberation: exact string match (strict)
-                if other.contribution != ref.contribution:
-                    return False
-
+        outputs = list(latest.values())
+        ref = outputs[0]
+        for other in outputs[1:]:
+            if other.contribution != ref.contribution:
+                return False
         self.converged = True
         return True
 

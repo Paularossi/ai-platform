@@ -30,10 +30,10 @@ class AgentOutput:
     agent_name : str
     cycle : int
         0-indexed round number.
-    contribution : Any
-        str for deliberation tasks, dict[field→verdict] for classification.
+    contribution : str
+        The agent's free-text contribution for this round.
     changed : dict[str, bool]
-        Per-field change flags vs previous state (set by hub).
+        Change flags vs previous state (set by hub).
     ecu_scores : dict[str, float]
         Quality scores received from peer review (set after Phase 2).
     ecu_earned : float | None
@@ -49,14 +49,6 @@ class AgentOutput:
     ecu_earned: float | None = None
     raw_response: str | None = None
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-
-    @property
-    def is_classification(self) -> bool:
-        return isinstance(self.contribution, dict)
-
-    @property
-    def labels(self) -> dict[str, Any]:
-        return self.contribution if isinstance(self.contribution, dict) else {}
 
     def to_dict(self) -> dict:
         return {
@@ -110,6 +102,12 @@ class PeerReviewOutput:
     coalition_scores: dict[str, float] = field(default_factory=dict)
     review_justifications: dict[str, str] = field(default_factory=dict)
     coalition_justifications: dict[str, str] = field(default_factory=dict)  # deprecated alias
+    importance_votes: dict[str, float] = field(default_factory=dict)
+    """
+    {dimension: points} — this agent's importance vote.
+    Points sum to 100. Collected during Phase 2, used by the Orchestrator.
+    Empty dict when orchestrator is disabled or vote parsing failed.
+    """
     raw_response: str | None = None
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
@@ -122,6 +120,7 @@ class PeerReviewOutput:
             "coalition_scores": self.coalition_scores,
             "review_justifications": self.review_justifications,
             "coalition_justifications": self.coalition_justifications,
+            "importance_votes": self.importance_votes,
             "raw_response": self.raw_response,
             "timestamp": self.timestamp,
         }

@@ -14,6 +14,9 @@ import re
 import sys
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_AMS = ZoneInfo("Europe/Amsterdam")
 from pathlib import Path
 from typing import Any
 
@@ -59,73 +62,28 @@ def build_agents(cfg: dict) -> list[Agent]:
     return [Agent(a, cfg) for a in cfg.get("agents", [])]
 
 
-def build_protocol(agents: list[Agent], cfg: dict, dry_run: bool,
+def build_protocol(agents: list[Agent], cfg: dict,
                    peer_reviewer=None, coalition_tracker=None, orchestrator=None):
     """Return the correct protocol instance based on the configured setting."""
     setting = cfg.get("protocol", {}).get("setting", "Simultaneous")
     if setting in ("Simultaneous", "Crowd (parallel)"):
         return CrowdProtocol(agents, cfg, peer_reviewer=peer_reviewer,
                              coalition_tracker=coalition_tracker,
-                             orchestrator=orchestrator, dry_run=dry_run)
+                             orchestrator=orchestrator)
     elif setting in ("Sequential", "Gossip (sequential)"):
         return GossipProtocol(agents, cfg, peer_reviewer=peer_reviewer,
                               coalition_tracker=coalition_tracker,
-                              orchestrator=orchestrator, dry_run=dry_run)
+                              orchestrator=orchestrator)
     raise ValueError(f"Unknown protocol setting: '{setting}'")
 
 
-def _normalize_image_key(raw: Any) -> str:
-    """Normalize an item/image identifier for tolerant filename matching."""
-    s = str(raw).strip()
-    s = re.sub(r"\.0+$", "", s)
-    return s.lower()
-
-
-def resolve_image_path(
-    item_id: str,
-    dataset_cfg: dict,
-    zip_bytes: bytes | None,
-) -> str | None:
-    """Try to find the image file on disk for a given item_id stem."""
-    image_dir = st.session_state.get("dataset_image_dir")
-    if not image_dir:
-        return None
-
-    lookup: dict[str, str] = st.session_state.get("dataset_image_lookup", {}) or {}
-    norm = _normalize_image_key(item_id)
-
-    # Direct lookup from ZIP extraction
-    if norm in lookup and os.path.exists(lookup[norm]):
-        return lookup[norm]
-
-    # Fallback scan of the image directory
-    try:
-        for name in os.listdir(image_dir):
-            full = os.path.join(image_dir, name)
-            if os.path.isfile(full) and _normalize_image_key(os.path.splitext(name)[0]) == norm:
-                return full
-    except Exception:
-        pass
-
-    return None
-
-
-def build_item_data(row: pd.Series, column_mapping: dict, image_path: str | None) -> dict:
-    """
-    Build the item_data dict from a dataframe row using the column mapping.
-    Image is stored as a path; the agent will load it when needed.
-    """
-    data: dict[str, Any] = {}
-    for field_name, col_name in column_mapping.items():
-        if col_name == "- not mapped -" or not col_name:
-            continue
-        if col_name in row.index:
-            data[field_name] = str(row[col_name])
-
-    if image_path:
-        data["image_path"] = image_path
-
-    return data
+def build_item_data(row: pd.Series, column_mapping: dict) -> dict:
+    """Build the item_data dict from a dataframe row using the column mapping."""
+    return {
+        field_name: str(row[col_name])
+        for field_name, col_name in column_mapping.items()
+        if col_name and col_name != "- not mapped -" and col_name in row.index
+    }
 
 
 def results_to_df(results: list[dict]) -> pd.DataFrame:
@@ -185,9 +143,6 @@ cfg = get_config()
 
 # ── Guard: check experiment is configured ─────────────────────────────────────
 agents_cfg = cfg.get("agents", [])
-questions = cfg.get("questions", [])
-task_mode = cfg.get("task", {}).get("mode", "deliberation")
-dataset_cfg = cfg.get("dataset", {})
 df: pd.DataFrame | None = st.session_state.get("dataset_df")
 column_mapping: dict = st.session_state.get("column_mapping", {})
 
@@ -229,8 +184,6 @@ with st.container(border=True):
             help="Leave blank if OPENAI_API_KEY is already set in your environment.",
         )
 
-dry_run = False  # Always use real API calls
-
 proto = cfg.get("protocol", {})
 c1, c2, c3, c4 = st.columns([5, 2, 2, 3])
 c1.metric("Setting", proto.get("setting", "-"))
@@ -250,7 +203,7 @@ def _show_results(results: list[dict], experiment_cfg: dict) -> None:
     results_df = results_to_df(results)
     st.dataframe(results_df, width="stretch", hide_index=True)
 
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
+    timestamp = datetime.now(_AMS).strftime("%Y%m%d_%H%M")
     exp_name = experiment_cfg.get("overview", {}).get("name", "experiment").replace(" ", "_").lower()
 
     dl1, dl2 = st.columns(2)
@@ -293,10 +246,10 @@ def _show_nav_buttons():
                 "visibility_mode", "review_depth", "order_type", "max_cycles",
                 "stopping_rule", "initializer_agent", "judge_agent",
                 "exp_name", "author", "protocol_id", "task_description",
-                "dataset_df", "dataset_filename", "column_mapping", "dataset_ready",
-                "dataset_source", "inline_rows", "run_results",
+                "dataset_df", "column_mapping", "run_results",
                 "ecu_enabled", "ecu_info_condition", "ecu_self_assessment",
                 "ecu_coalition_threshold", "ecu_dimensions",
+                "ecu_orchestrator_enabled", "ecu_orchestrator_every",
             ]
             for key in keys_to_clear:
                 st.session_state.pop(key, None)
@@ -319,7 +272,7 @@ if not launch:
 st.session_state.pop("run_results", None)
 
 # ── Set API key if provided ───────────────────────────────────────────────────
-if not dry_run and api_key_input:
+if api_key_input:
     os.environ["OPENAI_API_KEY"] = api_key_input
 
 # ── Build agents ──────────────────────────────────────────────────────────────
@@ -330,33 +283,10 @@ review_depth = proto.get("review_depth", "previous_round")
 
 # ── Diagnostics ───────────────────────────────────────────────────────────────
 with st.expander("🔍 Pre-run diagnostics", expanded=False):
-    st.markdown(f"**Task mode:** {task_mode}")
     st.markdown(f"**Agents:** {[a.name for a in agents]}")
-    st.markdown(f"**Visibility mode:** {visibility_mode}")
-    st.markdown(f"**Column mapping:** {st.session_state.get('column_mapping', {})}")
+    st.markdown(f"**Visibility mode: ()** {visibility_mode}")
+    st.markdown(f"**Peer review depth: ()** {review_depth}")
 
-    if task_mode == "classification":
-        if cfg.get("questions"):
-            st.markdown("**Question fields:** " + ", ".join(
-                f"`{q['field_name']}`" for q in cfg["questions"]
-            ))
-    else:
-        st.info("Deliberation mode — no questions required. Agents produce free-text contributions.")
-
-    # Image diagnostics (only relevant when images are in the dataset)
-    img_dir = st.session_state.get("dataset_image_dir")
-    if img_dir:
-        st.divider()
-        st.markdown("**Image resolution diagnostics**")
-        st.success(f"Image temp dir: `{img_dir}`")
-        try:
-            files_on_disk = os.listdir(img_dir)
-            st.markdown(f"Files in temp dir ({len(files_on_disk)} total), first 10:")
-            st.code("\n".join(files_on_disk[:10]))
-        except Exception as e:
-            st.error(f"Cannot list temp dir: {e}")
-
-    st.divider()
     if agents:
         st.markdown("**System prompt preview (Agent 1):**")
         from core.agent import _build_system_prompt
@@ -366,7 +296,7 @@ with st.expander("🔍 Pre-run diagnostics", expanded=False):
             base_instructions=cfg.get("instructions", {}).get("base_instructions", ""),
             guideline_notes=cfg.get("instructions", {}).get("guideline_notes", ""),
             agent_overrides=cfg.get("agent_prompt_overrides", {}),
-            questions=cfg.get("questions", []) if task_mode == "classification" else [],
+            questions=[],
         )
         st.code(preview, language=None)
 
@@ -385,10 +315,7 @@ if ecu_enabled:
         dimensions=active_dims,
         include_self_assessment=include_self_assessment,
         review_depth=review_depth,
-        dry_run=dry_run,
     )
-    if dry_run:
-        st.info("ECU peer review is in dry-run mode — all scores will be 0.5.", icon="💡")
 
 # ── Slice dataset ─────────────────────────────────────────────────────────────
 subset = df.head(int(n_items)).reset_index(drop=True)
@@ -407,7 +334,7 @@ status_rows: list[dict] = []
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 for item_idx, row in subset.iterrows():
-    id_col = column_mapping.get("id", column_mapping.get("image", None))
+    id_col = column_mapping.get("id", None)
     if id_col and id_col in df.columns:
         item_id = str(row[id_col])
     elif len(df.columns) > 0:
@@ -415,8 +342,7 @@ for item_idx, row in subset.iterrows():
     else:
         item_id = f"item_{item_idx}"
 
-    image_path = resolve_image_path(item_id, dataset_cfg, None)
-    item_data = build_item_data(row, column_mapping, image_path)
+    item_data = build_item_data(row, column_mapping)
 
     # Build a fresh ledger, coalition tracker, and orchestrator per item
     item_ledger: EcuLedger | None = None
@@ -437,14 +363,13 @@ for item_idx, row in subset.iterrows():
         item_coalition = CoalitionTracker(threshold=coalition_threshold)
         if ecu_cfg.get("orchestrator_enabled", False):
             item_orchestrator = Orchestrator(
-                step_size=float(ecu_cfg.get("orchestrator_step_size", 0.1)),
-                update_every=int(ecu_cfg.get("orchestrator_every", 2)),
+                update_every=int(ecu_cfg.get("orchestrator_every", 1)),
                 enabled=True,
             )
 
     # Build protocol fresh per item
     protocol = build_protocol(
-        agents, cfg, dry_run=dry_run,
+        agents, cfg,
         peer_reviewer=peer_reviewer,
         coalition_tracker=item_coalition,
         orchestrator=item_orchestrator,
@@ -463,10 +388,6 @@ for item_idx, row in subset.iterrows():
 
     # ── Live turn feed for this item ──────────────────────────────────────
     with st.expander(f"📄 Item {item_idx + 1} / {len(subset)}  -  `{item_id}`", expanded=True):
-
-        if item_data.get("image_path"):
-            st.caption(f"Image: {item_data['image_path']}")
-
         feed = st.empty()
         entries: list[str] = []   # accumulated markdown lines rendered all at once
 
@@ -532,7 +453,7 @@ for item_idx, row in subset.iterrows():
                 lines = [f"#### 📨 **{event.agent_name}** → Hub  ·  Round {event.cycle + 1}  ·  {change_note}"]
                 contrib = str(output.contribution) if output.contribution else "*(empty)*"
                 lines.append(f"**Contribution:** {contrib}")
-                if not output.contribution and output.raw_response and not output.raw_response.startswith("[dry-run"):
+                if not output.contribution and output.raw_response:
                     lines.append(f"⚠️ **Raw response (parse failed):**\n```\n{output.raw_response}\n```")
                 entries.append("\n\n".join(lines))
 
@@ -544,15 +465,32 @@ for item_idx, row in subset.iterrows():
                 if round_reviews:
                     review = round_reviews[-1]
                     lines = [f"#### 📋 **{event.agent_name}** peer review  ·  Round {event.cycle + 1}"]
-                    for reviewed, dim_scores in review.scores.items():
-                        score_str = "  ,  ".join(f"{d}: **{s:.2f}**" for d, s in dim_scores.items())
-                        justification = review.coalition_justifications.get(reviewed, "")
-                        lines.append(f"→ **{reviewed}**: {score_str}")
-                        if justification and justification not in ("[dry-run]", ""):
-                            lines.append(f"  _{justification}_")
+
+                    # Scores as a compact table
+                    if review.scores:
+                        dim_names = list(next(iter(review.scores.values())).keys())
+                        header = "| Agent | " + " | ".join(dim_names) + " |"
+                        sep    = "|---|" + "|".join(["---"] * len(dim_names)) + "|"
+                        lines.append(header)
+                        lines.append(sep)
+                        for reviewed, dim_scores in review.scores.items():
+                            score_vals = " | ".join(f"{dim_scores.get(d, 0):.2f}" for d in dim_names)
+                            justification = review.coalition_justifications.get(reviewed, "")
+                            just_note = f" _{justification}_" if justification else ""
+                            lines.append(f"| **{reviewed}** | {score_vals} |{just_note}")
+
                     if review.self_scores:
-                        self_str = "  ,  ".join(f"{d}: {s:.2f}" for d, s in review.self_scores.items())
-                        lines.append(f"→ **Self**: {self_str}")
+                        dim_names = list(review.self_scores.keys())
+                        self_vals = " | ".join(f"{review.self_scores.get(d, 0):.2f}" for d in dim_names)
+                        lines.append(f"| *(self)* | {self_vals} |")
+
+                    # Importance votes
+                    if review.importance_votes:
+                        vote_str = " · ".join(
+                            f"**{d}**: {round(v)}" for d, v in review.importance_votes.items()
+                        )
+                        lines.append(f"\n_Dimension importance votes (out of 100): {vote_str}_")
+
                     entries.append("\n\n".join(lines))
 
             elif event.kind == "ecu_update":
@@ -562,41 +500,63 @@ for item_idx, row in subset.iterrows():
                 if item_ledger:
                     round_records = [r for r in item_ledger.history if r.cycle == event.cycle]
                     if round_records:
-                        lines.append("**This round's scores (peer-averaged):**")
+                        # Scores + earnings as table
+                        dim_names = list(round_records[0].aggregated_scores.keys())
+                        header = "| Agent | " + " | ".join(dim_names) + " | **ECU earned** |"
+                        sep    = "|---|" + "|".join(["---"] * len(dim_names)) + "|---|"
+                        lines.append(header)
+                        lines.append(sep)
                         for rec in round_records:
-                            score_str = "  ,  ".join(f"{d}: {s:.2f}" for d, s in rec.aggregated_scores.items())
-                            lines.append(f"→ **{rec.agent_name}**: {score_str}  →  **+{rec.ecu_earned:.3f} ecus**")
+                            score_vals = " | ".join(f"{rec.aggregated_scores.get(d, 0):.2f}" for d in dim_names)
+                            lines.append(f"| **{rec.agent_name}** | {score_vals} | **+{rec.ecu_earned:.3f}** |")
 
                 if balances:
-                    bal_str = "  ·  ".join(f"**{n}**: {b:.3f}" for n, b in balances.items())
-                    lines.append(f"**Cumulative balances:** {bal_str}")
+                    bal_parts = "  ·  ".join(f"**{n}**: {b:.3f}" for n, b in balances.items())
+                    lines.append(f"\n**Cumulative balances:** {bal_parts}")
+
+                if item_ledger and item_ledger.social_welfare_history:
+                    sw_entry = next(
+                        (e for e in reversed(item_ledger.social_welfare_history)
+                         if e["cycle"] == event.cycle), None,
+                    )
+                    if sw_entry:
+                        sw_weights_str = "  ,  ".join(
+                            f"{k}={v:.2f}" for k, v in sw_entry["sw_weights"].items()
+                        )
+                        lines.append(
+                            f"**SW:** {sw_entry['social_welfare']:.4f}"
+                            f"  *(w^SW: {sw_weights_str})*"
+                        )
 
                 if item_coalition and item_coalition.history:
                     last_c = item_coalition.history[-1]
                     c = last_c.get("coalition", [])
+                    coalition_label = ", ".join(c) if len(c) >= 2 else "none"
                     lines.append(
-                        f"**Coalition** (τ={coalition_threshold}): "
-                        + (f"**{', '.join(c)}**" if c else "*(none above threshold)*")
+                        f"**Coalition** (τ={coalition_threshold}): {coalition_label}"
                     )
 
                 if item_orchestrator:
                     cycle_updates = [u for u in item_orchestrator.history if u.cycle == event.cycle]
-                    ran_this_cycle = (event.cycle + 1) % item_orchestrator.update_every == 0
                     if cycle_updates:
-                        lines.append("**Orchestrator weight updates:**")
-                        for u in cycle_updates:
-                            lines.append(
-                                f"→ {u.dimension}: {u.old_weight:.2f} → **{u.new_weight:.2f}** "
-                                f"(SW: {u.sw_before:.3f} → {u.sw_after:.3f})"
-                            )
-                        # Show current full weight vector after updates
-                        current_w = {k: round(v, 3) for k, v in item_ledger.ecu_weights.items()}
-                        w_str = "  ,  ".join(f"{k}={v}" for k, v in current_w.items())
-                        lines.append(f"Updated ECU weights: {w_str}")
-                    elif ran_this_cycle:
-                        lines.append("**Orchestrator:** ran — no weight improvement found (already near-optimal for this round).")
+                        u = cycle_updates[-1]
+                        # Vote table
+                        dim_names = list(u.mean_votes.keys())
+                        vote_header = "| | " + " | ".join(dim_names) + " |"
+                        vote_sep    = "|---|" + "|".join(["---"] * len(dim_names)) + "|"
+                        vote_vals   = " | ".join(f"{round(u.mean_votes[d], 1)}" for d in dim_names)
+                        old_vals    = " | ".join(f"{round(u.old_weights[d], 3)}" for d in dim_names)
+                        new_vals    = " | ".join(f"**{round(u.new_weights[d], 3)}**" for d in dim_names)
+                        lines.append(f"\n**Orchestrator** (lr={u.learning_rate:.4f})")
+                        lines.append(vote_header)
+                        lines.append(vote_sep)
+                        lines.append(f"| votes | {vote_vals} |")
+                        lines.append(f"| old w | {old_vals} |")
+                        lines.append(f"| **new w** | {new_vals} |")
 
                 entries.append("\n\n".join(lines))
+
+
 
             # Re-render the full feed after every event
             feed.markdown("\n\n---\n\n".join(entries))
@@ -616,21 +576,29 @@ for item_idx, row in subset.iterrows():
             with st.expander("📊 Orchestrator weight trajectory", expanded=False):
                 if item_ledger and item_ledger.social_welfare_history:
                     st.markdown("**Social welfare trajectory**")
-                    st.dataframe(pd.DataFrame(item_ledger.social_welfare_history), hide_index=True, use_container_width=True)
-                rows = []
+                    st.dataframe(
+                        pd.DataFrame(item_ledger.social_welfare_history),
+                        hide_index=True, use_container_width=True,
+                    )
+                st.markdown("**Importance-vote weight updates**")
+                update_rows = []
                 for u in item_orchestrator.history:
-                    rows.append({
+                    row = {
                         "Round": u.cycle + 1,
-                        "Dimension": u.dimension,
-                        "Old weight": round(u.old_weight, 3),
-                        "New weight": round(u.new_weight, 3),
-                        "Direction": u.direction,
-                        "SW before": round(u.sw_before, 4),
-                        "SW after": round(u.sw_after, 4),
-                    })
-                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                        "lr": round(u.learning_rate, 4),
+                    }
+                    for d, v in u.mean_votes.items():
+                        row[f"vote_{d}"] = round(v, 1)
+                    for d, v in u.new_weights.items():
+                        row[f"w_{d}"] = round(v, 3)
+                    update_rows.append(row)
+                st.dataframe(
+                    pd.DataFrame(update_rows), hide_index=True, use_container_width=True
+                )
                 st.caption(
-                    "Only ECU incentive weights w^ECU are updated. SW weights w^SW stay fixed."
+                    "vote_* = mean importance points (sum ≈ 100).  "
+                    "w_* = updated ECU weights after renormalisation.  "
+                    "SW weights w^SW are fixed and never shown here."
                 )
 
     # Store result

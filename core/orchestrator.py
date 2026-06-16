@@ -1,198 +1,205 @@
 """
 core/orchestrator.py
 
-Orchestrator update rule for the peer-review OMAS platform.
+Importance-vote gradient Orchestrator for the peer-review OMAS platform.
 
-The model now separates two weight vectors:
+The platform separates two weight vectors:
 
-    w^SW   fixed social-planner valuation weights used only to compute SW
-    w^ECU  variable incentive weights used only to pay agents ECUs
+    w^SW   fixed social-planner valuation weights, used only to compute SW
+    w^ECU  variable incentive weights, used only to pay agents ECUs
 
-Implemented formulas
---------------------
-    ecu_i^(t) = Σ_q w_q^ECU · (1/(n-1))Σ_{j≠i}s_ji^(t)(q)
+This Orchestrator updates w^ECU every K rounds using importance votes collected
+from agents during Phase 2 peer review. Each agent distributes 100 points across
+the quality dimensions, answering the question:
+"Given the topic of the debate and your role, which dimensions are most important
+to you?"
 
-    SW^(t) = Σ_q w_q^SW · (1/n)Σ_i (1/(n-1))Σ_{j≠i}s_ji^(t)(q)
+Update rule (Robbins-Monro gradient ascent)
+-------------------------------------------
+Let v_i = agent i's importance vector (sums to 100).
+Let v̄_q  = (1/n) * sum_i v_i_q             (mean vote across agents, sums to 100)
+Let v̂_q  = v̄_q / 100                       (normalised, sums to 1)
 
-The Orchestrator controls w^ECU, not w^SW. Since the platform observes only the
-realized peer scores from the current round and cannot re-run counterfactual agent
-responses for every candidate weight vector, the local search uses a simple response
-approximation: increasing a dimension's ECU incentive is predicted to raise the next
-round's mean score on that dimension slightly. Candidate ECU weights are therefore
-evaluated by the approximate objective:
+New weights before renormalisation:
+    w_q^ECU(t+1) = w_q^ECU(t) + (1/t) * v̂_q
 
-    max_{w^ECU} SW^(t+1) ≈ Σ_q w_q^SW · s̄_q^(t)(w^ECU)
+Then renormalise so sum(w_q^ECU) = initial_sum, preserving the update direction
+while keeping the ECU budget stable across rounds.
 
-where s̄_q is the mean peer score by dimension.
+The 1/t learning rate satisfies the Robbins-Monro conditions (sum 1/t = inf,
+sum 1/t^2 < inf), guaranteeing convergence as t -> inf. For finite T the schedule
+gives larger updates early and diminishing updates later, without unbounded growth.
+
+Advantages over sandbox coordinate search (orchestrator_sandbox.py):
+  - Zero additional LLM calls (votes collected in regular Phase 2)
+  - Participatory: agents determine the update direction from their perspective
+  - No counterfactual re-runs required
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.ecu import EcuLedger
-    from core.state import PeerReviewOutput
 
 
 @dataclass
 class OrchestratorUpdate:
-    """Record of one ECU-weight update decision."""
+    """Record of one importance-vote gradient step."""
     cycle: int
-    dimension: str
-    old_weight: float
-    new_weight: float
-    sw_before: float
-    sw_after: float
-    direction: str  # "+" or "-"
+    old_weights: dict[str, float]
+    raw_votes: dict[str, dict[str, float]]
+    mean_votes: dict[str, float]
+    normalised_votes: dict[str, float]
+    learning_rate: float
+    pre_normalise_weights: dict[str, float]
+    new_weights: dict[str, float]
 
     def to_dict(self) -> dict:
         return {
             "cycle": self.cycle,
-            "dimension": self.dimension,
-            "old_weight": round(self.old_weight, 4),
-            "new_weight": round(self.new_weight, 4),
-            "sw_before": round(self.sw_before, 4),
-            "sw_after": round(self.sw_after, 4),
-            "direction": self.direction,
+            "learning_rate": round(self.learning_rate, 6),
+            "old_weights": {k: round(v, 6) for k, v in self.old_weights.items()},
+            "raw_votes": {
+                agent: {d: round(v, 2) for d, v in votes.items()}
+                for agent, votes in self.raw_votes.items()
+            },
+            "mean_votes": {k: round(v, 4) for k, v in self.mean_votes.items()},
+            "normalised_votes": {k: round(v, 6) for k, v in self.normalised_votes.items()},
+            "pre_normalise_weights": {k: round(v, 6) for k, v in self.pre_normalise_weights.items()},
+            "new_weights": {k: round(v, 6) for k, v in self.new_weights.items()},
         }
 
 
 class Orchestrator:
     """
-    Updates the variable ECU incentive vector w^ECU.
+    Updates w^ECU using importance-vote gradient ascent.
 
-    The fixed SW valuation vector w^SW lives in EcuLedger.sw_weights and is never
-    changed by this class.
+    The fixed SW valuation vector w^SW lives in EcuLedger.sw_weights and is
+    never changed by this class.
+
+    Parameters
+    ----------
+    update_every : int
+        Run the update every K rounds (default 1 = every round).
+    min_weight : float
+        Floor for any individual weight after renormalisation (default 0.1).
+    enabled : bool
+        If False, all update calls are no-ops.
     """
 
     def __init__(
         self,
-        step_size: float = 0.1,
-        update_every: int = 2,
+        update_every: int = 1,
         min_weight: float = 0.1,
-        max_weight: float = 3.0,
         enabled: bool = True,
-        response_strength: float = 0.05,
     ):
-        self.step_size = step_size
-        self.update_every = update_every
-        self.min_weight = min_weight
-        self.max_weight = max_weight
+        self.update_every = max(1, int(update_every))
+        self.min_weight = float(min_weight)
         self.enabled = enabled
-        self.response_strength = response_strength
         self._history: list[OrchestratorUpdate] = []
 
-    def step(
+    def should_update(self, cycle: int, *, is_final_cycle: bool = False) -> bool:
+        """Return True when the Orchestrator should run after this real cycle."""
+        if not self.enabled or is_final_cycle:
+            return False
+        return (cycle + 1) % self.update_every == 0
+
+    def update(
         self,
         cycle: int,
-        round_reviews: list[PeerReviewOutput],
-        ledger: EcuLedger,
-    ) -> dict[str, float]:
+        ledger: "EcuLedger",
+        importance_votes: dict[str, dict[str, float]],
+    ) -> OrchestratorUpdate | None:
         """
-        Run one Orchestrator step.
+        Apply one importance-vote gradient step.
 
-        Returns the current ECU weights. On update rounds, each dimension is
-        perturbed by ±ε and the candidate with the highest approximate SW is kept.
+        Parameters
+        ----------
+        cycle : int
+            Completed real cycle (0-indexed). Learning rate = 1 / (cycle + 1).
+        ledger : EcuLedger
+            Official ledger; ECU weights updated in-place.
+        importance_votes : dict[str, dict[str, float]]
+            {agent_name: {dimension: points}} where each agent's points sum to 100.
+            Agents with invalid or zero-sum votes are silently excluded.
         """
-        # Always record realized SW for this round using fixed w^SW.
-        ledger.record_social_welfare(cycle, round_reviews)
-
         if not self.enabled:
-            return dict(ledger.ecu_weights)
+            return None
 
-        if (cycle + 1) % self.update_every != 0:
-            return dict(ledger.ecu_weights)
+        dim_names = list(ledger.ecu_weights.keys())
 
-        weights = dict(ledger.ecu_weights)
-        target_sum = sum(weights.values())
-        mean_scores = ledger.mean_peer_scores(round_reviews)
-        sw_current = self._compute_sw(mean_scores, ledger.sw_weights)
+        # ── 1. Validate and normalise each agent's vote to sum exactly 100 ──
+        valid_votes: dict[str, dict[str, float]] = {}
+        for agent, votes in importance_votes.items():
+            if not isinstance(votes, dict):
+                continue
+            filtered = {d: max(0.0, float(votes.get(d, 0.0))) for d in dim_names}
+            total = sum(filtered.values())
+            if total <= 0:
+                continue
+            valid_votes[agent] = {d: v * 100.0 / total for d, v in filtered.items()}
 
-        for dim in list(weights.keys()):
-            old_w = weights[dim]
+        if not valid_votes:
+            return None
 
-            w_plus = self._normalise(weights, dim, old_w + self.step_size, target_sum)
-            predicted_plus = self._predict_mean_scores(mean_scores, weights, w_plus)
-            sw_plus = self._compute_sw(predicted_plus, ledger.sw_weights)
+        # ── 2. Average across agents (sums to 100) ───────────────────────────
+        n = len(valid_votes)
+        mean_votes: dict[str, float] = {
+            d: sum(v[d] for v in valid_votes.values()) / n
+            for d in dim_names
+        }
 
-            w_minus = self._normalise(weights, dim, old_w - self.step_size, target_sum)
-            predicted_minus = self._predict_mean_scores(mean_scores, weights, w_minus)
-            sw_minus = self._compute_sw(predicted_minus, ledger.sw_weights)
+        # ── 3. Normalise to sum to 1 ─────────────────────────────────────────
+        total = sum(mean_votes.values())
+        normalised: dict[str, float] = {d: mean_votes[d] / total for d in dim_names}
 
-            best_sw = max(sw_plus, sw_minus)
-            if best_sw > sw_current + 1e-9:
-                if sw_plus >= sw_minus:
-                    new_weights = w_plus
-                    direction = "+"
-                    new_sw = sw_plus
-                else:
-                    new_weights = w_minus
-                    direction = "-"
-                    new_sw = sw_minus
+        # ── 4. Gradient step: w_q += (1/t) * v̂_q ───────────────────────────
+        t = cycle + 1
+        lr = 1.0 / t
+        old_weights = dict(ledger.ecu_weights)
+        initial_sum = sum(old_weights.values())
+        stepped = {d: old_weights[d] + lr * normalised[d] for d in dim_names}
 
-                self._history.append(OrchestratorUpdate(
-                    cycle=cycle,
-                    dimension=dim,
-                    old_weight=old_w,
-                    new_weight=new_weights[dim],
-                    sw_before=sw_current,
-                    sw_after=new_sw,
-                    direction=direction,
-                ))
-                weights = new_weights
-                sw_current = new_sw
+        # ── 5. Renormalise to initial_sum ────────────────────────────────────
+        new_weights = self._renormalise(stepped, initial_sum)
+        ledger.update_ecu_weights(new_weights)
 
-        ledger.update_ecu_weights(weights)
-        return weights
+        update = OrchestratorUpdate(
+            cycle=cycle,
+            old_weights=old_weights,
+            raw_votes=valid_votes,
+            mean_votes=mean_votes,
+            normalised_votes=normalised,
+            learning_rate=lr,
+            pre_normalise_weights=stepped,
+            new_weights=new_weights,
+        )
+        self._history.append(update)
+        return update
 
-    def _normalise(
-        self,
-        weights: dict[str, float],
-        target_dim: str,
-        new_val: float,
-        target_sum: float,
-    ) -> dict[str, float]:
-        """Perturb one ECU weight and rescale the others to keep Σw^ECU fixed."""
-        new_val = max(self.min_weight, min(self.max_weight, new_val))
-        out = dict(weights)
-        out[target_dim] = new_val
-        others = [d for d in out if d != target_dim]
-        remaining = max(0.0, target_sum - new_val)
-        other_sum = sum(out[d] for d in others)
-        if others and other_sum > 0:
-            scale = remaining / other_sum
-            for d in others:
-                out[d] = max(self.min_weight, min(self.max_weight, out[d] * scale))
-        return out
+    def _renormalise(self, weights: dict[str, float], target_sum: float) -> dict[str, float]:
+        """Scale weights to target_sum, clip at min_weight, redistribute residual."""
+        total = sum(weights.values())
+        if total <= 0:
+            n = len(weights)
+            return {d: target_sum / n for d in weights}
 
-    def _predict_mean_scores(
-        self,
-        current_scores: dict[str, float],
-        current_ecu_weights: dict[str, float],
-        candidate_ecu_weights: dict[str, float],
-    ) -> dict[str, float]:
-        """
-        Approximate s̄_q^(t)(w^ECU) for a candidate incentive vector.
+        out = {d: v * target_sum / total for d, v in weights.items()}
 
-        The approximation is intentionally conservative: a positive relative change
-        in a dimension's ECU weight predicts a small improvement in that dimension's
-        next mean score; a negative change predicts a small decrease. Scores remain
-        clipped to [0, 1].
-        """
-        predicted: dict[str, float] = {}
-        for dim, score in current_scores.items():
-            old = max(current_ecu_weights.get(dim, 1.0), 1e-9)
-            new = candidate_ecu_weights.get(dim, old)
-            relative_change = (new - old) / old
-            predicted[dim] = min(1.0, max(0.0, score + self.response_strength * relative_change))
-        return predicted
+        # Clip and redistribute
+        clipped = {d: max(self.min_weight, v) for d, v in out.items()}
+        excess = sum(clipped.values()) - target_sum
+        if abs(excess) > 1e-9:
+            adjustable = [d for d in clipped if clipped[d] > self.min_weight]
+            if adjustable:
+                cut = excess / len(adjustable)
+                for d in adjustable:
+                    clipped[d] = max(self.min_weight, clipped[d] - cut)
 
-    @staticmethod
-    def _compute_sw(mean_scores: dict[str, float], sw_weights: dict[str, float]) -> float:
-        """SW = Σ_q w_q^SW · s̄_q."""
-        return sum(sw_weights.get(dim, 1.0) * mean_scores.get(dim, 0.0) for dim in sw_weights)
+        return clipped
 
     @property
     def history(self) -> list[OrchestratorUpdate]:
@@ -201,8 +208,8 @@ class Orchestrator:
     def to_dict(self) -> dict:
         return {
             "enabled": self.enabled,
-            "step_size": self.step_size,
+            "algorithm": "importance_vote_gradient",
             "update_every": self.update_every,
-            "response_strength": self.response_strength,
+            "min_weight": self.min_weight,
             "updates": [u.to_dict() for u in self._history],
         }

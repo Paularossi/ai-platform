@@ -24,10 +24,11 @@ Phase 2 (if peer_reviewer configured):
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Iterator
 from typing import Any
 
-from core.agent import Agent
+from core.agent import Agent, get_openai_client
 from core.hub import CommunicationHub, ContextPacket
 from core.protocols import RunEvent
 from core.state import AgentOutput
@@ -51,14 +52,16 @@ class CrowdProtocol:
         dry_run: bool = False,
     ):
         self.agents = agents
-        self.dry_run = dry_run
         self.peer_reviewer = peer_reviewer
         self.coalition_tracker = coalition_tracker
         self.orchestrator = orchestrator
+        self.dry_run = dry_run
+        self._openai_client_cache = None
 
         protocol = experiment_config.get("protocol", {})
         self.max_cycles: int = int(protocol.get("max_cycles", 5))
         self.stopping_rule: str = protocol.get("stopping_rule", "Either")
+
 
     def run(self, hub: CommunicationHub) -> CommunicationHub:
         for _ in self.run_iter(hub):
@@ -68,6 +71,10 @@ class CrowdProtocol:
     def run_iter(self, hub: CommunicationHub) -> Iterator[RunEvent]:
 
         for cycle_idx in range(self.max_cycles):
+
+            # Snapshot the official pre-round state. Counterfactual orchestrator
+            # evaluations clone this snapshot so sandbox outputs never enter the
+            # official dialogue history.
 
             # ── Phase 1: simultaneous blind contributions ─────────────────
             # Build all packets from a pre-round snapshot so no agent sees
@@ -109,7 +116,9 @@ class CrowdProtocol:
 
             # ── Phase 2: peer review ──────────────────────────────────────
             if self.peer_reviewer:
-                yield from self._run_peer_review(hub, cycle_idx, round_outputs, packets[0][1])
+                yield from self._run_peer_review(
+                    hub, cycle_idx, round_outputs, packets[0][1]
+                )
 
             # ── Stopping rule ─────────────────────────────────────────────
             if self.stopping_rule in ("Convergence", "Either"):
@@ -129,11 +138,12 @@ class CrowdProtocol:
         all_contributions = {o.agent_name: o.contribution for o in round_outputs}
         item_context = ", ".join(
             f"{k}: {v}" for k, v in hub.item_data.items()
-            if k.lower() not in ("image", "image_url", "image_path")
+
         )
+        # Collect importance votes when orchestrator is enabled
+        collect_votes = self.orchestrator is not None and self.orchestrator.enabled
 
         for agent in self.agents:
-            # Build ecu_info per agent so semi-transparent shows each agent's own balance
             ecu_info = hub.ecu_info_str(cycle_idx, calling_agent=agent.name)
             if self.peer_reviewer.dry_run:
                 review = self.peer_reviewer.parse(
@@ -152,11 +162,10 @@ class CrowdProtocol:
                     ecu_info=ecu_info,
                     reviewer_role=agent.role,
                     agent_histories=hub.build_review_history(cycle_idx),
+                    collect_importance_votes=collect_votes,
                 )
                 try:
-                    from openai import OpenAI
-                    client = OpenAI()
-                    response = client.chat.completions.create(
+                    response = get_openai_client().chat.completions.create(
                         model=agent.model,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.0,
@@ -187,10 +196,22 @@ class CrowdProtocol:
 
         if hub.ledger:
             hub.compute_ecus_for_round(cycle_idx)
-            # Orchestrator runs before the ecu_update event so the UI
-            # can show updated weights in the same event block.
-            if self.orchestrator:
-                self.orchestrator.step(cycle_idx, round_reviews, hub.ledger)
+            hub.ledger.record_social_welfare(cycle_idx, round_reviews)
+
+            if self.orchestrator and self.orchestrator.should_update(
+                cycle_idx, is_final_cycle=cycle_idx >= self.max_cycles - 1
+            ):
+                importance_votes = {
+                    r.reviewer_name: r.importance_votes
+                    for r in round_reviews
+                    if r.importance_votes
+                }
+                self.orchestrator.update(
+                    cycle=cycle_idx,
+                    ledger=hub.ledger,
+                    importance_votes=importance_votes,
+                )
+
             yield RunEvent(
                 kind="ecu_update",
                 cycle=cycle_idx,

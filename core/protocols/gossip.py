@@ -26,11 +26,12 @@ Phase 2 (if peer_reviewer configured):
 
 from __future__ import annotations
 
+import copy
 import random
 from collections.abc import Iterator
 from typing import Any
 
-from core.agent import Agent
+from core.agent import Agent, get_openai_client
 from core.hub import CommunicationHub
 from core.protocols import RunEvent
 from core.state import AgentOutput
@@ -55,16 +56,18 @@ class GossipProtocol:
         dry_run: bool = False,
     ):
         self.agents = agents
-        self.dry_run = dry_run
         self.peer_reviewer = peer_reviewer
         self.coalition_tracker = coalition_tracker
         self.orchestrator = orchestrator
+        self.dry_run = dry_run
+        self._openai_client_cache = None
 
         protocol = experiment_config.get("protocol", {})
         self.max_cycles: int = int(protocol.get("max_cycles", 5))
         self.stopping_rule: str = protocol.get("stopping_rule", "Either")
         self.order_type: str = protocol.get("order_type", "Fixed")
         self.initializer_name: str | None = protocol.get("initializer_agent")
+
 
     def run(self, hub: CommunicationHub) -> CommunicationHub:
         for _ in self.run_iter(hub):
@@ -75,6 +78,10 @@ class GossipProtocol:
         ordered_agents = self._build_agent_order()
 
         for cycle_idx in range(self.max_cycles):
+            # Snapshot the official pre-round state. Counterfactual orchestrator
+            # evaluations clone this snapshot so sandbox outputs never enter the
+            # official dialogue history.
+
             if self.order_type == "Randomized each cycle" and cycle_idx > 0:
                 ordered_agents = self._build_agent_order(randomize=True)
 
@@ -114,7 +121,9 @@ class GossipProtocol:
 
             # ── Phase 2: peer review ──────────────────────────────────────
             if self.peer_reviewer:
-                yield from self._run_peer_review(hub, cycle_idx, round_outputs, ordered_agents)
+                yield from self._run_peer_review(
+                    hub, cycle_idx, round_outputs, ordered_agents
+                )
 
             # ── Stopping rule ─────────────────────────────────────────────
             if self.stopping_rule in ("Convergence", "Either"):
@@ -137,12 +146,12 @@ class GossipProtocol:
 
         item_context = ", ".join(
             f"{k}: {v}" for k, v in hub.item_data.items()
-            if k.lower() not in ("image", "image_url", "image_path")
+
         )
         ref_packet = hub.build_context(ordered_agents[0].name, cycle_idx)
+        collect_votes = self.orchestrator is not None and self.orchestrator.enabled
 
         for agent in ordered_agents:
-            # Build ecu_info per agent so semi-transparent shows each agent's own balance
             ecu_info = hub.ecu_info_str(cycle_idx, calling_agent=agent.name)
             if self.peer_reviewer.dry_run:
                 review = self.peer_reviewer.parse(
@@ -161,11 +170,10 @@ class GossipProtocol:
                     ecu_info=ecu_info,
                     reviewer_role=agent.role,
                     agent_histories=hub.build_review_history(cycle_idx),
+                    collect_importance_votes=collect_votes,
                 )
                 try:
-                    from openai import OpenAI
-                    client = OpenAI()
-                    response = client.chat.completions.create(
+                    response = get_openai_client().chat.completions.create(
                         model=agent.model,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.0,
@@ -196,14 +204,29 @@ class GossipProtocol:
 
         if hub.ledger:
             hub.compute_ecus_for_round(cycle_idx)
-            if self.orchestrator:
-                self.orchestrator.step(cycle_idx, round_reviews, hub.ledger)
+            hub.ledger.record_social_welfare(cycle_idx, round_reviews)
+
+            if self.orchestrator and self.orchestrator.should_update(
+                cycle_idx, is_final_cycle=cycle_idx >= self.max_cycles - 1
+            ):
+                importance_votes = {
+                    r.reviewer_name: r.importance_votes
+                    for r in round_reviews
+                    if r.importance_votes
+                }
+                self.orchestrator.update(
+                    cycle=cycle_idx,
+                    ledger=hub.ledger,
+                    importance_votes=importance_votes,
+                )
+
             yield RunEvent(
                 kind="ecu_update",
                 cycle=cycle_idx,
                 agent_name="__all__",
                 packet=ref_packet,
             )
+
 
     def _build_agent_order(self, randomize: bool = False) -> list[Agent]:
         agents = list(self.agents)
