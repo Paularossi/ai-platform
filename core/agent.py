@@ -4,45 +4,18 @@ core/agent.py
 Stateless agent wrapper.
 
 The agent receives a ContextPacket from the hub, builds a prompt,
-calls the OpenAI API, parses the structured response, and returns
+calls the appropriate LLM provider, parses the response, and returns
 an AgentOutput.
-
-Two task modes are supported, determined by whether the experiment
-config contains structured questions:
-
-  Classification mode  — questions with option codes are present.
-                         Output: contribution = dict[field→verdict],
-                         prob_distribution populated, confidence derived.
-
-  Deliberation mode    — no structured questions (or text-only).
-                         Output: contribution = str (free-text statement),
-                         prob_distribution empty, confidence self-reported.
-
-The agent has no memory between calls — all context comes from the hub.
 """
 
 from __future__ import annotations
-
-_openai_client = None
-
-
-def get_openai_client():
-    """Return a module-level cached OpenAI client. Created once, reused everywhere."""
-    global _openai_client
-    if _openai_client is None:
-        from openai import OpenAI
-        _openai_client = OpenAI()
-    return _openai_client
 
 import re
 from typing import Any
 
 from core.hub import ContextPacket
 from core.state import AgentOutput
-
-
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
+from core.providers import get_provider
 # Prompt builders
 # ---------------------------------------------------------------------------
 
@@ -285,16 +258,12 @@ class Agent:
             )
 
         try:
-            response = get_openai_client().chat.completions.create(
+            provider = get_provider(self.provider)
+            raw_text = provider.complete(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                temperature=0.0,
-                max_tokens=1500,
+                system_prompt=system_prompt,
+                user_message=user_message,
             )
-            raw_text = response.choices[0].message.content or ""
         except Exception as exc:
             raw_text = f"[ERROR: {exc}]"
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import time
 from datetime import datetime
@@ -157,7 +156,7 @@ if missing:
     for m in missing:
         st.markdown(f"- {m}")
     if st.button("← Back to Review"):
-        st.switch_page("pages/5_Review.py")
+        st.switch_page("pages/4_Review.py")
     st.stop()
 
 # ── Run configuration panel ───────────────────────────────────────────────────
@@ -177,12 +176,18 @@ with st.container(border=True):
         )
 
     with col2:
-        api_key_input = st.text_input(
-            "OpenAI API key",
-            type="password",
-            value=os.environ.get("OPENAI_API_KEY", ""),
-            help="Leave blank if OPENAI_API_KEY is already set in your environment.",
-        )
+        from core.providers import API_KEY_ENV_VARS
+        used_providers = sorted({a.get("provider", "OpenAI") for a in agents_cfg})
+        api_keys: dict[str, str] = {}
+        for provider in used_providers:
+            env_var = API_KEY_ENV_VARS.get(provider, f"{provider.upper()}_API_KEY")
+            api_keys[provider] = st.text_input(
+                f"{provider} API key",
+                type="password",
+                value=os.environ.get(env_var, ""),
+                key=f"api_key_{provider}",
+                help=f"Leave blank if {env_var} is already set in your environment.",
+            )
 
 proto = cfg.get("protocol", {})
 c1, c2, c3, c4 = st.columns([5, 2, 2, 3])
@@ -201,7 +206,7 @@ def _show_results(results: list[dict], experiment_cfg: dict) -> None:
     col2.metric("Total turns", sum(r["num_turns"] for r in results))
 
     results_df = results_to_df(results)
-    st.dataframe(results_df, width="stretch", hide_index=True)
+    st.dataframe(results_df, use_container_width=True, hide_index=True)
 
     timestamp = datetime.now(_AMS).strftime("%Y%m%d_%H%M")
     exp_name = experiment_cfg.get("overview", {}).get("name", "experiment").replace(" ", "_").lower()
@@ -271,9 +276,12 @@ if not launch:
 # Clear any previous results so a fresh run always starts clean
 st.session_state.pop("run_results", None)
 
-# ── Set API key if provided ───────────────────────────────────────────────────
-if api_key_input:
-    os.environ["OPENAI_API_KEY"] = api_key_input
+# ── Set API keys if provided ──────────────────────────────────────────────────
+from core.providers import API_KEY_ENV_VARS as _KEY_VARS
+for _provider, _key in api_keys.items():
+    if _key:
+        _env = _KEY_VARS.get(_provider, f"{_provider.upper()}_API_KEY")
+        os.environ[_env] = _key
 
 # ── Build agents ──────────────────────────────────────────────────────────────
 agents = build_agents(cfg)
@@ -386,16 +394,15 @@ for item_idx, row in subset.iterrows():
         review_depth=review_depth,
     )
 
-    # ── Live turn feed for this item ──────────────────────────────────────
+    # ── Live turn feed ─────────────────────────────────────────────────────
     with st.expander(f"📄 Item {item_idx + 1} / {len(subset)}  -  `{item_id}`", expanded=True):
-        feed = st.empty()
-        entries: list[str] = []   # accumulated markdown lines rendered all at once
+        # Each event appends a new permanent container rather than rebuilding
+        # one giant markdown string. This ensures tables render correctly.
+        feed_container = st.container()
 
         t_start = time.time()
 
         is_crowd = cfg.get("protocol", {}).get("setting", "") in ("Simultaneous", "Crowd (parallel)")
-        # In Crowd mode we render one compact "context" block at the START of each
-        # new cycle (before any submissions) instead of a per-agent dispatch block.
         _last_crowd_cycle_rendered = -1
 
         for event in protocol.run_iter(hub):
@@ -405,57 +412,39 @@ for item_idx, row in subset.iterrows():
                     if event.cycle > 0 and event.cycle != _last_crowd_cycle_rendered:
                         _last_crowd_cycle_rendered = event.cycle
                         packet = event.packet
-                        agent_list = [a.name for a in agents]
-                        dlines = [
-                            f"#### 📬 Round {event.cycle + 1} · Context sent to all agents",
-                            f"**Agents:** {', '.join(agent_list)}",
-                        ]
-                        if packet.visible_history:
-                            round_labels = ", ".join(
-                                f"{h.agent_name} (round {h.cycle + 1})"
-                                for h in packet.visible_history
-                            )
-                            dlines.append(f"**Previous contributions visible:** {round_labels}")
-                        else:
-                            dlines.append("**Round 1 — agents contribute blind (no prior context).**")
-                        entries.append("\n\n".join(dlines))
+                        with feed_container:
+                            st.markdown(f"#### 📬 Round {event.cycle + 1} · Context sent to all agents")
+                            if packet.visible_history:
+                                round_labels = ", ".join(
+                                    f"{h.agent_name} (round {h.cycle + 1})"
+                                    for h in packet.visible_history
+                                )
+                                st.caption(f"Previous contributions visible: {round_labels}")
+                            else:
+                                st.caption("Round 1 — agents contribute blind (no prior context).")
                     continue
 
-                # ── What the hub sent to this agent ──────────────────────
+                # Sequential dispatch
                 packet = event.packet
-                lines = [f"#### 🔀 Hub → **{event.agent_name}**  ·  Cycle {event.cycle + 1}"]
-
-                current = packet.current_contribution
-                if isinstance(current, dict) and current:
-                    label_str = "  ,  ".join(f"`{k}`: {v}" for k, v in current.items())
-                    lines.append(f"**Current answers:** {label_str}")
-                elif isinstance(current, str) and current.strip():
-                    lines.append(f"**Current position:** {current}")
-                else:
-                    lines.append("**Current state:** *(none yet)*")
-
-                if packet.visible_history:
-                    lines.append(f"**Visible history** ({len(packet.visible_history)} entry/entries):")
-                    for h in packet.visible_history:
-                        h_str = str(h.contribution)[:120] if h.contribution else "(none)"
-                        lines.append(f"- Round {h.cycle + 1} · **{h.agent_name}**: {h_str}")
-                else:
-                    lines.append(f"**Visible history:** *(none — {visibility_mode})*")
-
-                entries.append("\n\n".join(lines))
+                with feed_container:
+                    st.markdown(f"#### 🔀 Hub → **{event.agent_name}**  ·  Round {event.cycle + 1}")
+                    if packet.visible_history:
+                        lines = [f"- Round {h.cycle+1} · **{h.agent_name}**: {str(h.contribution)[:120]}"
+                                 for h in packet.visible_history]
+                        st.markdown("\n".join(lines))
+                    else:
+                        st.caption(f"Round 1 — contributing blind (φ₁: {visibility_mode})")
 
             elif event.kind == "submission":
-                # ── What the agent returned to the hub ───────────────────
                 output = event.output
                 changed_fields = [f for f, c in output.changed.items() if c]
                 change_note = f"✏️ revised: {', '.join(changed_fields)}" if changed_fields else "✔ no changes"
-
-                lines = [f"#### 📨 **{event.agent_name}** → Hub  ·  Round {event.cycle + 1}  ·  {change_note}"]
-                contrib = str(output.contribution) if output.contribution else "*(empty)*"
-                lines.append(f"**Contribution:** {contrib}")
-                if not output.contribution and output.raw_response:
-                    lines.append(f"⚠️ **Raw response (parse failed):**\n```\n{output.raw_response}\n```")
-                entries.append("\n\n".join(lines))
+                with feed_container:
+                    st.markdown(f"#### 📨 **{event.agent_name}** → Hub  ·  Round {event.cycle + 1}  ·  {change_note}")
+                    contrib = str(output.contribution) if output.contribution else "*(empty)*"
+                    st.markdown(contrib)
+                    if not output.contribution and output.raw_response:
+                        st.code(output.raw_response, language=None)
 
             elif event.kind == "peer_review":
                 round_reviews = [
@@ -464,102 +453,87 @@ for item_idx, row in subset.iterrows():
                 ]
                 if round_reviews:
                     review = round_reviews[-1]
-                    lines = [f"#### 📋 **{event.agent_name}** peer review  ·  Round {event.cycle + 1}"]
+                    with feed_container:
+                        st.markdown(f"#### 📋 **{event.agent_name}** peer review  ·  Round {event.cycle + 1}")
 
-                    # Scores as a compact table
-                    if review.scores:
-                        dim_names = list(next(iter(review.scores.values())).keys())
-                        header = "| Agent | " + " | ".join(dim_names) + " |"
-                        sep    = "|---|" + "|".join(["---"] * len(dim_names)) + "|"
-                        lines.append(header)
-                        lines.append(sep)
-                        for reviewed, dim_scores in review.scores.items():
-                            score_vals = " | ".join(f"{dim_scores.get(d, 0):.2f}" for d in dim_names)
-                            justification = review.coalition_justifications.get(reviewed, "")
-                            just_note = f" _{justification}_" if justification else ""
-                            lines.append(f"| **{reviewed}** | {score_vals} |{just_note}")
+                        if review.scores:
+                            import pandas as _pd
+                            dim_names = list(next(iter(review.scores.values())).keys())
+                            rows = []
+                            for reviewed, dim_scores in review.scores.items():
+                                row_d = {"Agent": reviewed}
+                                for d in dim_names:
+                                    row_d[d] = round(dim_scores.get(d, 0), 2)
+                                just = review.coalition_justifications.get(reviewed, "")
+                                if just:
+                                    row_d["Justification"] = just
+                                rows.append(row_d)
+                            if review.self_scores:
+                                self_row = {"Agent": "*(self)*"}
+                                for d in dim_names:
+                                    self_row[d] = round(review.self_scores.get(d, 0), 2)
+                                rows.append(self_row)
 
-                    if review.self_scores:
-                        dim_names = list(review.self_scores.keys())
-                        self_vals = " | ".join(f"{review.self_scores.get(d, 0):.2f}" for d in dim_names)
-                        lines.append(f"| *(self)* | {self_vals} |")
+                            st.dataframe(_pd.DataFrame(rows), hide_index=True, width="content")
 
-                    # Importance votes
-                    if review.importance_votes:
-                        vote_str = " · ".join(
-                            f"**{d}**: {round(v)}" for d, v in review.importance_votes.items()
-                        )
-                        lines.append(f"\n_Dimension importance votes (out of 100): {vote_str}_")
-
-                    entries.append("\n\n".join(lines))
+                        if review.importance_votes:
+                            vote_parts = "  ·  ".join(
+                                f"**{d}**: {round(v)}" for d, v in review.importance_votes.items()
+                            )
+                            st.caption(f"Dimension importance votes (out of 100): {vote_parts}")
 
             elif event.kind == "ecu_update":
                 balances = hub.ecu_balances
-                lines = [f"#### 💰 ECU update  ·  after Round {event.cycle + 1}"]
+                with feed_container:
+                    st.markdown(f"#### 💰 ECU update  ·  after Round {event.cycle + 1}")
 
-                if item_ledger:
-                    round_records = [r for r in item_ledger.history if r.cycle == event.cycle]
-                    if round_records:
-                        # Scores + earnings as table
-                        dim_names = list(round_records[0].aggregated_scores.keys())
-                        header = "| Agent | " + " | ".join(dim_names) + " | **ECU earned** |"
-                        sep    = "|---|" + "|".join(["---"] * len(dim_names)) + "|---|"
-                        lines.append(header)
-                        lines.append(sep)
-                        for rec in round_records:
-                            score_vals = " | ".join(f"{rec.aggregated_scores.get(d, 0):.2f}" for d in dim_names)
-                            lines.append(f"| **{rec.agent_name}** | {score_vals} | **+{rec.ecu_earned:.3f}** |")
+                    if item_ledger:
+                        round_records = [r for r in item_ledger.history if r.cycle == event.cycle]
+                        if round_records:
+                            dim_names = list(round_records[0].aggregated_scores.keys())
+                            score_rows = []
+                            for rec in round_records:
+                                r_d = {"Agent": rec.agent_name}
+                                for d in dim_names:
+                                    r_d[d] = round(rec.aggregated_scores.get(d, 0), 2)
+                                r_d["ECU earned"] = round(rec.ecu_earned, 3)
+                                score_rows.append(r_d)
+                            st.dataframe(pd.DataFrame(score_rows), hide_index=True, width="content")
 
-                if balances:
-                    bal_parts = "  ·  ".join(f"**{n}**: {b:.3f}" for n, b in balances.items())
-                    lines.append(f"\n**Cumulative balances:** {bal_parts}")
+                    # Balances, SW, coalition, orchestrator as metric row + captions
+                    if balances:
+                        bal_cols = st.columns(len(balances))
+                        for col, (name, bal) in zip(bal_cols, balances.items()):
+                            col.metric(f"{name} (cumulative)", f"{bal:.3f} ecus")
 
-                if item_ledger and item_ledger.social_welfare_history:
-                    sw_entry = next(
-                        (e for e in reversed(item_ledger.social_welfare_history)
-                         if e["cycle"] == event.cycle), None,
-                    )
+                    sw_entry = None
+                    if item_ledger and item_ledger.social_welfare_history:
+                        sw_entry = next(
+                            (e for e in reversed(item_ledger.social_welfare_history)
+                             if e["cycle"] == event.cycle), None,
+                        )
                     if sw_entry:
-                        sw_weights_str = "  ,  ".join(
-                            f"{k}={v:.2f}" for k, v in sw_entry["sw_weights"].items()
-                        )
-                        lines.append(
-                            f"**SW:** {sw_entry['social_welfare']:.4f}"
-                            f"  *(w^SW: {sw_weights_str})*"
-                        )
+                        sw_w = "  ,  ".join(f"{k}={v:.2f}" for k, v in sw_entry["sw_weights"].items())
+                        st.caption(f"SW = {sw_entry['social_welfare']:.4f}  |  w^SW (fixed): {sw_w}")
 
-                if item_coalition and item_coalition.history:
-                    last_c = item_coalition.history[-1]
-                    c = last_c.get("coalition", [])
-                    coalition_label = ", ".join(c) if len(c) >= 2 else "none"
-                    lines.append(
-                        f"**Coalition** (τ={coalition_threshold}): {coalition_label}"
-                    )
+                    if item_coalition and item_coalition.history:
+                        last_c = item_coalition.history[-1]
+                        c = last_c.get("coalition", [])
+                        coalition_label = ", ".join(c) if len(c) >= 2 else "none"
+                        st.caption(f"Coalition (τ={coalition_threshold}): {coalition_label}")
 
-                if item_orchestrator:
-                    cycle_updates = [u for u in item_orchestrator.history if u.cycle == event.cycle]
-                    if cycle_updates:
-                        u = cycle_updates[-1]
-                        # Vote table
-                        dim_names = list(u.mean_votes.keys())
-                        vote_header = "| | " + " | ".join(dim_names) + " |"
-                        vote_sep    = "|---|" + "|".join(["---"] * len(dim_names)) + "|"
-                        vote_vals   = " | ".join(f"{round(u.mean_votes[d], 1)}" for d in dim_names)
-                        old_vals    = " | ".join(f"{round(u.old_weights[d], 3)}" for d in dim_names)
-                        new_vals    = " | ".join(f"**{round(u.new_weights[d], 3)}**" for d in dim_names)
-                        lines.append(f"\n**Orchestrator** (lr={u.learning_rate:.4f})")
-                        lines.append(vote_header)
-                        lines.append(vote_sep)
-                        lines.append(f"| votes | {vote_vals} |")
-                        lines.append(f"| old w | {old_vals} |")
-                        lines.append(f"| **new w** | {new_vals} |")
-
-                entries.append("\n\n".join(lines))
-
-
-
-            # Re-render the full feed after every event
-            feed.markdown("\n\n---\n\n".join(entries))
+                    if item_orchestrator:
+                        cycle_updates = [u for u in item_orchestrator.history if u.cycle == event.cycle]
+                        if cycle_updates:
+                            u = cycle_updates[-1]
+                            dim_names = list(u.mean_votes.keys())
+                            orch_rows = [
+                                {"": "votes (out of 100)", **{d: round(u.mean_votes[d], 1) for d in dim_names}},
+                                {"": "old ECU weights",  **{d: round(u.old_weights[d], 3) for d in dim_names}},
+                                {"": "new ECU weights",  **{d: round(u.new_weights[d], 3) for d in dim_names}},
+                            ]
+                            st.markdown(f"**Orchestrator** — learning rate: {u.learning_rate:.4f}")
+                            st.dataframe(pd.DataFrame(orch_rows), hide_index=True, width="content")
 
         elapsed = time.time() - t_start
 
@@ -635,7 +609,7 @@ for item_idx, row in subset.iterrows():
     # Update live summary table
     results_placeholder.dataframe(
         pd.DataFrame(status_rows),
-        width="stretch",
+        use_container_width=True,
         hide_index=True,
     )
 
@@ -647,3 +621,6 @@ st.session_state["run_results"] = all_results
 # ── Summary + download ────────────────────────────────────────────────────────
 _show_results(all_results, cfg)
 _show_nav_buttons()
+
+# TODO:
+# - check for convergence -> if coalition is formed then stop ? 

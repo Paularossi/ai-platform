@@ -64,14 +64,14 @@ def init_agent_state():
                 {
                     "name": "Agent 2",
                     "provider": "Anthropic",
-                    "model": "claude",
+                    "model": "claude-sonnet-4-6",
                     "role": "Custom",
                     "custom_role": "",
                 },
                 {
                     "name": "Agent 3",
-                    "provider": "Google",
-                    "model": "gemini",
+                    "provider": "Anthropic",
+                    "model": "claude-opus-4-8",
                     "role": "Custom",
                     "custom_role": "",
                 },
@@ -177,7 +177,6 @@ with main_col:
         sync_agents_to_count(num_agents)
         sync_agents_to_config()
 
-        provider_options = ["OpenAI", "Anthropic", "Google", "Mistral", "Local"]
 
         for i in range(st.session_state.num_agents):
             agent = st.session_state.agents[i]
@@ -194,6 +193,8 @@ with main_col:
                         placeholder=f"e.g. Economist, Historian, Agent {i+1}",
                     )
                 with c2:
+                    from core.providers import PROVIDERS, PROVIDER_MODELS
+                    provider_options = PROVIDERS
                     agent["provider"] = st.selectbox(
                         "Provider",
                         provider_options,
@@ -202,9 +203,14 @@ with main_col:
                         key=f"agent_provider_{i}",
                     )
                 with c3:
-                    agent["model"] = st.text_input(
+                    model_options = PROVIDER_MODELS.get(agent["provider"], [])
+                    # If stored model not in list keep it as free-text fallback
+                    if agent["model"] not in model_options:
+                        model_options = [agent["model"]] + model_options
+                    agent["model"] = st.selectbox(
                         "Model",
-                        value=agent["model"],
+                        model_options,
+                        index=model_options.index(agent["model"]),
                         key=f"agent_model_{i}",
                     )
 
@@ -323,8 +329,6 @@ with main_col:
                 stopping_options,
                 index=stopping_options.index(st.session_state.stopping_rule),
             )
-
-        st.info("Next: define agent instructions →")
 
     with st.container(border=True):
         st.subheader("5. ECU quality dimensions")
@@ -476,6 +480,8 @@ with main_col:
             "orchestrator_every": st.session_state.get("ecu_orchestrator_every", 2),
             "dimensions": st.session_state.ecu_dimensions,
         }
+
+    st.info("Next: define agent instructions →")
 
     nav1, nav2, nav3 = st.columns([2, 2, 0.8])
     with nav1:

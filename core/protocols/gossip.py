@@ -31,7 +31,8 @@ import random
 from collections.abc import Iterator
 from typing import Any
 
-from core.agent import Agent, get_openai_client
+from core.agent import Agent
+from core.providers import get_provider
 from core.hub import CommunicationHub
 from core.protocols import RunEvent
 from core.state import AgentOutput
@@ -173,13 +174,12 @@ class GossipProtocol:
                     collect_importance_votes=collect_votes,
                 )
                 try:
-                    response = get_openai_client().chat.completions.create(
+                    raw = get_provider(agent.provider).complete(
                         model=agent.model,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.0,
+                        system_prompt="You are a structured peer reviewer. Follow the instructions exactly.",
+                        user_message=prompt,
                         max_tokens=800,
                     )
-                    raw = response.choices[0].message.content or "{}"
                 except Exception as exc:
                     raw = f"[ERROR: {exc}]"
                 hub.log_prompt(cycle_idx, agent.name, "peer_review", prompt=prompt, response=raw)

@@ -116,11 +116,15 @@ class PeerReviewRound:
         include_self_assessment: bool = False,
         review_depth: str = "previous_round",
         dry_run: bool = False,
+        reviewer_provider: str = "OpenAI",
+        reviewer_model: str = "gpt-4o",
     ):
         self.dimensions = dimensions or DEFAULT_DIMENSIONS
         self.include_self_assessment = include_self_assessment
         self.review_depth = review_depth
         self.dry_run = dry_run
+        self.reviewer_provider = reviewer_provider
+        self.reviewer_model = reviewer_model
 
     def build_prompt(
         self,
@@ -390,15 +394,13 @@ class PeerReviewRound:
             cycle, item_context, ecu_info,
         )
         try:
-            from core.agent import get_openai_client
-            client = get_openai_client()
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
+            from core.providers import get_provider
+            raw = get_provider(self.reviewer_provider).complete(
+                model=self.reviewer_model,
+                system_prompt="You are a structured peer reviewer. Follow the instructions exactly.",
+                user_message=prompt,
                 max_tokens=800,
             )
-            raw = response.choices[0].message.content or "{}"
         except Exception as exc:
             raw = f"[ERROR: {exc}]"
 

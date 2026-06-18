@@ -25,9 +25,7 @@ def clear_experiment_state():
         "supervision_mode", "visibility_mode", "order_type", "max_cycles",
         "stopping_rule", "initializer_agent", "judge_agent",
         "exp_name", "author", "protocol_id", "task_category", "modalities",
-        "task_description", "task_mode",
-        "dataset_df", "dataset_filename", "dataset_image_bytes",
-        "dataset_all_image_names", "dataset_image_dir", "dataset_image_lookup",
+        "task_description", "dataset_df", "dataset_filename",
         "column_mapping", "dataset_ready", "run_results",
     ]
     for key in keys_to_clear:
