@@ -26,10 +26,13 @@ def _build_system_prompt(
     guideline_notes: str,
     agent_overrides: dict[str, str],
     questions: list[dict],
+    ecu_info_condition: str = "opaque",
+    ecu_dimensions: list[dict] | None = None,
 ) -> str:
     parts: list[str] = []
 
-    parts.append(f"You are {agent_name}. Your role: {agent_role}.")
+    role_str = agent_role.rstrip(".")
+    parts.append(f"You are {agent_name}. Your role: {role_str}.")
     parts.append("")
 
     override = agent_overrides.get(agent_name, "").strip()
@@ -44,6 +47,26 @@ def _build_system_prompt(
     if guideline_notes.strip():
         parts.append("--- Definitions and guidelines ---")
         parts.append(guideline_notes.strip())
+        parts.append("")
+
+    if ecu_info_condition in ("semi-transparent", "transparent") and ecu_dimensions:
+        dim_labels = ", ".join(d.get("label", d["name"]) for d in ecu_dimensions)
+        parts.append("--- Evaluation and incentives ---")
+        parts.append(
+            f"After each round your contribution is peer-reviewed by the other participants "
+            f"on these quality dimensions: {dim_labels}. "
+            f"Each dimension is scored 0–1 and you earn ECU (Experimental Currency Units) "
+            f"based on those scores."
+        )
+        if ecu_info_condition == "transparent":
+            parts.append(
+                "You can see all participants' scores, ECU balances, and the current "
+                "dimension weights in each round."
+            )
+        else:
+            parts.append(
+                "You can see your own ECU balance and approximate dimension weights each round."
+            )
         parts.append("")
 
     if questions:
@@ -72,30 +95,40 @@ def _build_user_message(packet: ContextPacket, questions: list[dict]) -> str:
 
     # ── Previous round context (from hub, cycle > 0) ──────────────────────────
     if packet.visible_history:
-        parts.append("=== Previous round ===")
-        parts.append("")
-
-        # Group history by agent for clean display
-        by_agent: dict[str, Any] = {}
+        # Group history by agent, preserving chronological order
+        by_agent: dict[str, list] = {}
         for out in packet.visible_history:
-            by_agent[out.agent_name] = out
+            by_agent.setdefault(out.agent_name, []).append(out)
+        # Sort each agent's entries by cycle
+        for entries in by_agent.values():
+            entries.sort(key=lambda o: o.cycle)
+
+        is_full_history = any(len(entries) > 1 for entries in by_agent.values())
+
+        parts.append("=== Contribution history ===" if is_full_history else "=== Previous round ===")
+        parts.append("")
 
         parts.append("Contributions:")
-        for agent_name, out in by_agent.items():
-            if agent_name == packet.agent_name:
-                label = f"{agent_name} (your previous contribution)"
+        for agent_name, entries in by_agent.items():
+            own = agent_name == packet.agent_name
+            label = f"{agent_name} (your contribution{'s' if is_full_history else ''})" if own else agent_name
+            if len(entries) == 1:
+                contrib = str(entries[0].contribution) if entries[0].contribution else "(none)"
+                parts.append(f"  [{label}]: {contrib}")
             else:
-                label = agent_name
-            contrib = str(out.contribution) if out.contribution else "(none)"
-            parts.append(f"  [{label}]: {contrib}")
+                parts.append(f"  [{label}]:")
+                for out in entries:
+                    contrib = str(out.contribution) if out.contribution else "(none)"
+                    parts.append(f"    Round {out.cycle + 1}: {contrib}")
         parts.append("")
 
-        # Show peer review scores if available
+        # Show peer review scores from the most recent round only
+        most_recent = [entries[-1] for entries in by_agent.values()]
         scores_shown = False
-        for out in packet.visible_history:
+        for out in most_recent:
             if out.ecu_scores:
                 if not scores_shown:
-                    parts.append("Peer review scores (average received):")
+                    parts.append("Peer review scores (average received, last round):")
                     scores_shown = True
                 score_str = ", ".join(f"{d}: {s:.2f}" for d, s in out.ecu_scores.items())
                 ecu_str = f"  [{out.ecu_earned:.2f} ecus]" if out.ecu_earned is not None else ""
@@ -137,7 +170,20 @@ def _parse_deliberation(
     """
     Parse free-text deliberation response.
     Extracts the main contribution, confidence (if reported), pros and cons.
+
+    Also handles the case where a model (e.g. Gemini in JSON mode) wraps
+    the contribution in a JSON envelope like {"response": "..."}.
     """
+    # Unwrap JSON envelope if present — e.g. {"response": "actual text"}
+    stripped_raw = raw_text.strip()
+    if stripped_raw.startswith("{") and '"response"' in stripped_raw:
+        try:
+            import json as _json
+            obj = _json.loads(stripped_raw)
+            if isinstance(obj, dict) and "response" in obj:
+                raw_text = str(obj["response"])
+        except Exception:
+            pass  # not valid JSON — continue with raw_text as-is
     pros: list[str] = []
     cons: list[str] = []
     confidence: float | None = None
@@ -215,6 +261,7 @@ class Agent:
         self.name: str = config.get("name", "Agent")
         self.provider: str = config.get("provider", "OpenAI")
         self.model: str = config.get("model", "gpt-4o")
+        self.temperature: float = float(config.get("temperature", 0.0))
 
         # Resolve effective role: if the dropdown says "Custom", use the
         # custom_role text the user typed; otherwise use the dropdown value.
@@ -225,6 +272,12 @@ class Agent:
         self._instructions = experiment_config.get("instructions", {})
         self._questions = experiment_config.get("questions", [])
         self._overrides = experiment_config.get("agent_prompt_overrides", {})
+        self._ecu_info_condition: str = experiment_config.get("ecu", {}).get("info_condition", "opaque")
+        self._ecu_dimensions: list[dict] = experiment_config.get("ecu", {}).get("dimensions", [])
+
+        # Cached from last call() — used by protocols for prompt logging
+        self._last_system_prompt: str = ""
+        self._last_user_message: str = ""
 
     def call(self, packet: ContextPacket, dry_run: bool = False) -> AgentOutput:
         """
@@ -244,9 +297,13 @@ class Agent:
             guideline_notes=self._instructions.get("guideline_notes", ""),
             agent_overrides=self._overrides,
             questions=self._questions,
+            ecu_info_condition=self._ecu_info_condition,
+            ecu_dimensions=self._ecu_dimensions,
         )
 
         user_message = _build_user_message(packet, self._questions)
+        self._last_system_prompt = system_prompt
+        self._last_user_message = user_message
 
         if dry_run:
             dummy = "[dry-run: no contribution]"
@@ -263,6 +320,7 @@ class Agent:
                 model=self.model,
                 system_prompt=system_prompt,
                 user_message=user_message,
+                temperature=self.temperature,
             )
         except Exception as exc:
             raw_text = f"[ERROR: {exc}]"

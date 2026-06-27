@@ -24,14 +24,13 @@ Phase 2 (if peer_reviewer configured):
 
 from __future__ import annotations
 
-import copy
 from collections.abc import Iterator
 from typing import Any
 
 from core.agent import Agent
 from core.providers import get_provider
 from core.hub import CommunicationHub, ContextPacket
-from core.protocols import RunEvent
+from core.protocols import RunEvent, build_ecu_info_str
 from core.state import AgentOutput
 
 
@@ -57,7 +56,6 @@ class CrowdProtocol:
         self.coalition_tracker = coalition_tracker
         self.orchestrator = orchestrator
         self.dry_run = dry_run
-        self._openai_client_cache = None
 
         protocol = experiment_config.get("protocol", {})
         self.max_cycles: int = int(protocol.get("max_cycles", 5))
@@ -97,15 +95,8 @@ class CrowdProtocol:
                 output = agent.call(packet, dry_run=self.dry_run)
                 hub.submit(output)
                 round_outputs.append(output)
-                # Log the prompt for debugging
-                from core.agent import _build_system_prompt, _build_user_message
-                sys_p = _build_system_prompt(agent.name, agent.role,
-                    agent._instructions.get("base_instructions",""),
-                    agent._instructions.get("guideline_notes",""),
-                    agent._overrides, agent._questions)
-                usr_p = _build_user_message(packet, agent._questions)
                 hub.log_prompt(cycle_idx, agent.name, "contribution",
-                               prompt=f"[SYSTEM]\n{sys_p}\n\n[USER]\n{usr_p}",
+                               prompt=f"[SYSTEM]\n{agent._last_system_prompt}\n\n[USER]\n{agent._last_user_message}",
                                response=output.raw_response or "")
                 yield RunEvent(
                     kind="submission",
@@ -144,8 +135,11 @@ class CrowdProtocol:
         # Collect importance votes when orchestrator is enabled
         collect_votes = self.orchestrator is not None and self.orchestrator.enabled
 
+        # Build review history once — same for all reviewers in a round
+        agent_histories = hub.build_review_history(cycle_idx)
+
         for agent in self.agents:
-            ecu_info = hub.ecu_info_str(cycle_idx, calling_agent=agent.name)
+            ecu_info = build_ecu_info_str(hub, cycle_idx, agent.name)
             if self.peer_reviewer.dry_run:
                 review = self.peer_reviewer.parse(
                     reviewer_name=agent.name,
@@ -162,15 +156,18 @@ class CrowdProtocol:
                     item_context=item_context,
                     ecu_info=ecu_info,
                     reviewer_role=agent.role,
-                    agent_histories=hub.build_review_history(cycle_idx),
+                    agent_histories=agent_histories,
                     collect_importance_votes=collect_votes,
                 )
                 try:
+                    pr_kwargs = {"json_mode": True} if agent.provider == "Google" else {}
                     raw = get_provider(agent.provider).complete(
                         model=agent.model,
-                        system_prompt="You are a structured peer reviewer. Follow the instructions exactly.",
+                        system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
                         user_message=prompt,
                         max_tokens=800,
+                        temperature=agent.temperature,
+                        **pr_kwargs,
                     )
                 except Exception as exc:
                     raw = f"[ERROR: {exc}]"

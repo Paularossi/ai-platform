@@ -8,7 +8,7 @@ Components
 
   PeerReviewRound
   ---------------
-  Prompts each agent to score all other agents on the five quality
+  Prompts each agent to score all other agents on the four quality
   dimensions and report a coalition agreement score (0-1) per peer.
   Returns a list of PeerReviewOutput objects.
 
@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import Any
 
 from core.state import PeerReviewOutput
@@ -104,9 +105,9 @@ class PeerReviewRound:
     include_self_assessment : bool
     review_depth : str
         φ₂ — how much contribution history the reviewer sees.
-        "current_only"   → only the current round's contribution
-        "previous_round" → current + previous round side-by-side
-        "full_history"   → full trajectory across all rounds
+        "Current Only"   → only the current round's contribution
+        "Previous Round" → current + previous round side-by-side
+        "Full History"   → full trajectory across all rounds
     dry_run : bool
     """
 
@@ -114,7 +115,7 @@ class PeerReviewRound:
         self,
         dimensions: list[dict] | None = None,
         include_self_assessment: bool = False,
-        review_depth: str = "previous_round",
+        review_depth: str = "Previous Round",
         dry_run: bool = False,
         reviewer_provider: str = "OpenAI",
         reviewer_model: str = "gpt-4o",
@@ -146,28 +147,28 @@ class PeerReviewRound:
         agent_histories : dict[str, list[str]] | None
             Per-agent contribution history from hub.build_review_history().
             {agent_name: [contribution_round_0, contribution_round_1, ...]}
-            Used when review_depth != "current_only".
+            Used when review_depth != "Current Only".
         """
         review_targets = list(all_contributions.keys()) if self.include_self_assessment \
             else [n for n in all_contributions if n != reviewer_name]
 
         dim_names = [d["name"] for d in self.dimensions]
-        # On cycle 0 there is no previous round — treat as current_only
+        # On cycle 0 there is no previous round — treat as Current Only
         # regardless of review_depth to avoid confusing agents.
         is_first_round = (cycle == 0)
         has_history = (
             agent_histories
-            and self.review_depth != "current_only"
+            and self.review_depth != "Current Only"
             and not is_first_round
         )
         lines: list[str] = []
 
         lines.append(
             f"You are {reviewer_name}."
-            + (f" {reviewer_role}." if reviewer_role else "")
+            + (f" {reviewer_role.rstrip('.')}." if reviewer_role else "")
             + " The contribution round has just ended. Complete the peer review below."
         )
-        lines.append(f"Topic: {item_context}")
+        lines.append(item_context)
         lines.append("")
 
         if ecu_info:
@@ -192,8 +193,8 @@ class PeerReviewRound:
         # Show peer contributions — with or without history
         if has_history:
             depth_label = {
-                "previous_round": "current round + previous round",
-                "full_history": "all rounds",
+                "Previous Round": "current round + previous round",
+                "Full History": "all rounds",
             }.get(self.review_depth, "")
             lines.append(
                 f"Contributions per agent ({depth_label}) — "
@@ -227,21 +228,6 @@ class PeerReviewRound:
         lines.append("For each agent, provide:")
         lines.append(f"  1. Quality scores on {len(self.dimensions)} dimensions (0.00 to 1.00 each).")
         lines.append("  2. A one-sentence justification summarising your overall assessment.")
-        if has_history:
-            lines.append(
-                "For the consensus dimension specifically: "
-                "score whether this agent's position CHANGED meaningfully from their "
-                "previous round in response to others' arguments. "
-                "0 = no change at all, 1 = substantially updated position."
-            )
-        elif is_first_round:
-            lines.append(
-                "For the consensus dimension specifically: "
-                "this is Round 1 — there is no previous contribution to compare against. "
-                "Score instead how constructively this contribution opens dialogue "
-                "and invites agreement. "
-                "0 = purely adversarial or closed; 1 = constructively invites convergence."
-            )
         lines.append("")
         lines.append("Quality dimension rubrics:")
         for d in self.dimensions:
@@ -258,7 +244,8 @@ class PeerReviewRound:
             )
             lines.append("")
 
-        lines.append("Respond ONLY with a JSON object in this exact format:")
+        lines.append("Return your evaluation as a JSON object in this exact format:")
+        lines.append("(Do not include any text before or after the JSON object, and do not wrap it in markdown code fences.)")
         lines.append("{")
         for name in review_targets:
             lines.append(f'  "{name}": {{')
@@ -273,7 +260,6 @@ class PeerReviewRound:
                 lines.append(f'    "{dim}": <integer points>{comma}')
             lines.append("  }")
         lines.append("}")
-        lines.append("No other text. No markdown fences.")
         return "\n".join(lines)
 
     def parse(
@@ -308,7 +294,7 @@ class PeerReviewRound:
                 scores=scores,
                 self_scores=self_scores,
                 coalition_scores={n: 0.5 for n in all_contributions if n != reviewer_name},
-                coalition_justifications={},
+                justifications={},
                 importance_votes={},
                 raw_response="[dry-run]",
             )
@@ -319,7 +305,13 @@ class PeerReviewRound:
         importance_votes: dict[str, float] = {}
 
         try:
-            clean = re.sub(r"```[a-z]*\n?", "", raw).strip()
+            # Strip markdown fences (```json ... ``` or ``` ... ```)
+            clean = re.sub(r"```[a-zA-Z]*\n?", "", raw).strip().rstrip("`").strip()
+            # If model prefixed the JSON with explanatory text, extract first {...}
+            if not clean.startswith("{"):
+                m = re.search(r"\{.*\}", clean, re.DOTALL)
+                clean = m.group(0) if m else clean
+            # Remove trailing commas before closing braces/brackets
             clean = re.sub(r",(\s*[}\]])", r"\1", clean)
             parsed = json.loads(clean)
 
@@ -371,7 +363,7 @@ class PeerReviewRound:
             scores=scores,
             self_scores=self_scores,
             coalition_scores=coalition,
-            coalition_justifications=justifications,
+            justifications=justifications,
             importance_votes=importance_votes,
             raw_response=raw,
         )
@@ -395,11 +387,13 @@ class PeerReviewRound:
         )
         try:
             from core.providers import get_provider
+            pr_kwargs = {"json_mode": True} if self.reviewer_provider == "Google" else {}
             raw = get_provider(self.reviewer_provider).complete(
                 model=self.reviewer_model,
-                system_prompt="You are a structured peer reviewer. Follow the instructions exactly.",
+                system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
                 user_message=prompt,
                 max_tokens=800,
+                **pr_kwargs,
             )
         except Exception as exc:
             raw = f"[ERROR: {exc}]"
@@ -495,7 +489,6 @@ class CoalitionTracker:
 
 def _subsets(items: list, size: int):
     """Yield all subsets of `items` of given size."""
-    from itertools import combinations
     yield from combinations(items, size)
 
 
@@ -706,7 +699,7 @@ class EcuLedger:
     def record_social_welfare(self, cycle: int, reviews: list[PeerReviewOutput]) -> float:
         """Compute and store social welfare for one round."""
         means = self.mean_peer_scores(reviews)
-        sw = sum(self.sw_weights.get(dim, 1.0) * means.get(dim, 0.0) for dim in self.dim_names)
+        sw = self.compute_social_welfare(reviews)
         self._social_welfare_history.append({
             "cycle": cycle,
             "mean_peer_scores": {k: round(v, 4) for k, v in means.items()},

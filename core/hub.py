@@ -20,7 +20,6 @@ outer loop (cycles, stopping rule) and delegates everything else here.
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -92,15 +91,13 @@ class CommunicationHub:
     review_depth : str
         φ₂ — what a reviewer sees about the agent they are scoring during
         peer review (Phase 2 review depth).
-        "current_only"   → reviewer sees only the current round's contribution
-        "previous_round" → reviewer sees current + previous round side-by-side
-        "full_history"   → reviewer sees the full contribution trajectory
+        "Current Only"   → reviewer sees only the current round's contribution
+        "Previous Round" → reviewer sees current + previous round side-by-side
+        "Full History"   → reviewer sees the full contribution trajectory
     agent_names : list[str]
         Ordered list of agent names (used for convergence checks).
     ledger : EcuLedger | None
         If provided, ecu scoring runs after every submission.
-    scorer : QualityScorer | None
-        Required when ledger is provided. Scores each contribution.
     ecu_info_condition : str
         "transparent"  — agents see ecu balances in their context packet
         "opaque"       — balances are hidden (default)
@@ -114,10 +111,10 @@ class CommunicationHub:
         agent_names: list[str],
         ledger: EcuLedger | None = None,
         ecu_info_condition: str = "opaque",
-        review_depth: str = "previous_round",
+        review_depth: str = "Previous Round",
     ):
         self.item_id = item_id
-        self.item_data = copy.deepcopy(item_data)
+        self.item_data = dict(item_data)
         self.visibility_mode = visibility_mode
         self.agent_names = agent_names
         self.ledger = ledger
@@ -148,13 +145,18 @@ class CommunicationHub:
                 ecu_balances = self.ledger.balances
                 ecu_weights = dict(self.ledger.ecu_weights)
             elif self.ecu_info_condition == "semi-transparent":
+                import random
                 own = self.ledger.balance_for(agent_name)
                 ecu_balances = {agent_name: own}
+                ecu_weights = {
+                    k: round(v * random.uniform(0.8, 1.2), 2)
+                    for k, v in self.ledger.ecu_weights.items()
+                }
 
         return ContextPacket(
             item_id=self.item_id,
-            item_data=copy.deepcopy(self.item_data),
-            current_contribution=copy.deepcopy(self._current_contribution),
+            item_data=self.item_data,
+            current_contribution=self._current_contribution,
             visible_history=self._build_visible_history(agent_name),
             cycle=cycle,
             agent_name=agent_name,
@@ -179,11 +181,11 @@ class CommunicationHub:
         if isinstance(output.contribution, dict) and isinstance(self._current_contribution, dict):
             self._current_contribution.update(output.contribution)
         else:
-            self._current_contribution = copy.deepcopy(output.contribution)
+            self._current_contribution = output.contribution
 
         if not self._log:
             self.originator_name = output.agent_name
-            self.originator_contribution = copy.deepcopy(output.contribution)
+            self.originator_contribution = output.contribution
 
         self._log.append(output)
 
@@ -204,9 +206,6 @@ class CommunicationHub:
             return {}
 
         round_reviews = [r for r in self._peer_review_log if r.cycle == cycle]
-        round_contributions = {
-            o.contribution for o in self._log if o.cycle == cycle
-        }
 
         # Map agent_name → contribution for this cycle
         contrib_map: dict[str, Any] = {
@@ -265,13 +264,13 @@ class CommunicationHub:
 
     @property
     def current_contribution(self) -> Any:
-        return copy.deepcopy(self._current_contribution)
+        return self._current_contribution
 
     # Keep current_labels as a convenience alias for classification tasks
     @property
     def current_labels(self) -> dict[str, Any]:
         if isinstance(self._current_contribution, dict):
-            return copy.deepcopy(self._current_contribution)
+            return self._current_contribution
         return {}
 
     def set_current_labels(self, labels: dict[str, Any]) -> None:
@@ -280,10 +279,7 @@ class CommunicationHub:
         Used by aggregating protocols (e.g. Crowd) to push the round's
         aggregated result after all individual submissions are collected.
         """
-        if isinstance(self._current_contribution, dict):
-            self._current_contribution = copy.deepcopy(labels)
-        else:
-            self._current_contribution = copy.deepcopy(labels)
+        self._current_contribution = labels
 
     @property
     def num_submissions(self) -> int:
@@ -340,46 +336,6 @@ class CommunicationHub:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def ecu_info_str(self, cycle: int, calling_agent: str = "") -> str:
-        """
-        Build the ECU context string for a specific agent based on T/S/O condition.
-        Called by protocols before Phase 2 peer review.
-        Empty string under opaque condition.
-
-        Parameters
-        ----------
-        calling_agent : str
-            Name of the agent receiving this info. Under semi-transparent,
-            only this agent's own balance is shown.
-        """
-        if not self.ledger or self.ecu_info_condition == "opaque":
-            return ""
-
-        balances = self.ledger.balances
-        weights = self.ledger.ecu_weights
-        sw_weights = self.ledger.sw_weights
-
-        if self.ecu_info_condition == "transparent":
-            w_str = ", ".join(f"{k}={v:.2f}" for k, v in weights.items())
-            sw_str = ", ".join(f"{k}={v:.2f}" for k, v in sw_weights.items())
-            b_str = ", ".join(f"{k}={v:.3f}" for k, v in balances.items())
-            return (
-                f"[ECU update — Round {cycle + 1}] "
-                f"ECU incentive weights: {w_str}. "
-                f"Fixed SW weights: {sw_str}. "
-                f"All balances: {b_str}."
-            )
-        elif self.ecu_info_condition == "semi-transparent":
-            import random
-            noisy = {k: round(v * random.uniform(0.8, 1.2), 2) for k, v in weights.items()}
-            w_str = ", ".join(f"{k}≈{v}" for k, v in noisy.items())
-            own_balance = balances.get(calling_agent, 0.0) if calling_agent else 0.0
-            return (
-                f"[ECU update — Round {cycle + 1}] "
-                f"Approximate weights: {w_str}. "
-                f"Your balance: {own_balance:.3f} ecus."
-            )
-        return ""
 
     def _build_visible_history(self, agent_name: str) -> list[AgentOutput]:
         """
@@ -416,9 +372,9 @@ class CommunicationHub:
         Returns {agent_name: [contribution_round_0, contribution_round_1, ...]}
         The caller (protocol) slices this based on review_depth.
 
-        "current_only"   → only the current cycle's contribution
-        "previous_round" → current + previous cycle (if any)
-        "full_history"   → all cycles up to and including current
+        "Current Only"   → only the current cycle's contribution
+        "Previous Round" → current + previous cycle (if any)
+        "Full History"   → all cycles up to and including current
         """
         # Group contributions by agent and cycle
         per_agent: dict[str, list[tuple[int, Any]]] = {}
@@ -432,17 +388,17 @@ class CommunicationHub:
             # Sort by cycle
             entries_sorted = sorted(entries, key=lambda x: x[0])
 
-            if self.review_depth == "current_only":
+            if self.review_depth == "Current Only":
                 # Only the current cycle
                 current = [c for c in entries_sorted if c[0] == cycle]
                 result[agent] = [str(c[1]) for c in current] if current else []
 
-            elif self.review_depth == "previous_round":
+            elif self.review_depth == "Previous Round":
                 # Current + one round back
                 relevant = [c for c in entries_sorted if c[0] >= cycle - 1]
                 result[agent] = [str(c[1]) for c in relevant]
 
-            else:  # "full_history"
+            else:  # "Full History"
                 result[agent] = [str(c[1]) for c in entries_sorted]
 
         return result

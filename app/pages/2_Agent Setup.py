@@ -18,7 +18,7 @@ def init_agent_config():
             "setting": "Simultaneous",
             "supervision_mode": "Unsupervised",
             "visibility_mode": "Previous round",
-            "review_depth": "previous_round",
+            "review_depth": "Previous Round",
             "order_type": "Fixed",
             "initializer_agent": "Agent 1",
             "judge_agent": "Agent 3",
@@ -33,7 +33,7 @@ def sync_agents_to_config():
         "setting": st.session_state.interaction_setting,
         "supervision_mode": st.session_state.supervision_mode,
         "visibility_mode": st.session_state.visibility_mode,
-        "review_depth": st.session_state.get("review_depth", "previous_round"),
+        "review_depth": st.session_state.get("review_depth", "Previous Round"),
         "order_type": st.session_state.order_type,
         "initializer_agent": st.session_state.initializer_agent,
         "judge_agent": st.session_state.judge_agent,
@@ -58,6 +58,7 @@ def init_agent_state():
                     "name": "Agent 1",
                     "provider": "OpenAI",
                     "model": "gpt-4o",
+                    "temperature": 0.0,
                     "role": "Custom",
                     "custom_role": "",
                 },
@@ -65,6 +66,7 @@ def init_agent_state():
                     "name": "Agent 2",
                     "provider": "Anthropic",
                     "model": "claude-sonnet-4-6",
+                    "temperature": 0.0,
                     "role": "Custom",
                     "custom_role": "",
                 },
@@ -86,7 +88,7 @@ def init_agent_state():
     if "visibility_mode" not in st.session_state:
         st.session_state.visibility_mode = protocol.get("visibility_mode", "Previous round")
     if "review_depth" not in st.session_state:
-        st.session_state.review_depth = protocol.get("review_depth", "previous_round")
+        st.session_state.review_depth = protocol.get("review_depth", "Previous Round")
 
     if "order_type" not in st.session_state:
         st.session_state.order_type = protocol.get("order_type", "Fixed")
@@ -113,6 +115,7 @@ def sync_agents_to_count(n: int):
                     "name": f"Agent {i+1}",
                     "provider": "OpenAI",
                     "model": "gpt-4o",
+                    "temperature": 0.0,
                     "role": "Custom",
                     "custom_role": "",
                 }
@@ -184,7 +187,7 @@ with main_col:
             agent["role"] = "Custom"
 
             with st.expander(f"Agent {i+1}", expanded=True if i < 3 else False):
-                c1, c2, c3 = st.columns(3)
+                c1, c2, c3, c4 = st.columns([3, 2, 3, 2])
                 with c1:
                     agent["name"] = st.text_input(
                         "Agent name",
@@ -212,6 +215,16 @@ with main_col:
                         model_options,
                         index=model_options.index(agent["model"]),
                         key=f"agent_model_{i}",
+                    )
+                with c4:
+                    agent["temperature"] = st.number_input(
+                        "Temperature",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=float(agent.get("temperature", 0.0)),
+                        step=0.01,
+                        key=f"agent_temperature_{i}",
+                        help="0 = deterministic. Higher values increase randomness. 1 = very random.",
                     )
 
                 agent["custom_role"] = st.text_area(
@@ -260,11 +273,11 @@ with main_col:
             )
 
         with c2:
-            phi2_options = ["current_only", "previous_round", "full_history"]
+            phi2_options = ["Current Only", "Previous Round", "Full History"]
             phi2_labels = {
-                "current_only": "Current only — see only this round's contribution",
-                "previous_round": "Previous round — see current + previous round side-by-side",
-                "full_history": "Full history — see the full contribution trajectory",
+                "Current Only": "Current Only — see only this round's contribution",
+                "Previous Round": "Previous Round — see current + previous round side-by-side",
+                "Full History": "Full History — see the full contribution trajectory",
             }
             st.session_state.review_depth = st.selectbox(
                 "φ₂ — Phase 2 review depth (during peer review)",

@@ -1,12 +1,10 @@
 """Main entry point — landing page with two paths: new experiment or load draft."""
 
-# select a simple case to show a demo - billboard? communication hub, and illustrate this first solution
-# but in the true version we'll have all scenarios
+# select a simple case to show a demo
 # 1. demo
 # 2. make it exciting
 # 3. professional use for whatever purposes
 
-# guiding question: Should the city introduce congestion charges on its inner ring road?
 import json
 
 import streamlit as st

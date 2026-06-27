@@ -1,5 +1,7 @@
-#langgraph
+# langgraph
 anthropic
+google-genai
 openai
 openpyxl
+# pydantic>=2.0
 streamlit

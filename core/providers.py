@@ -26,7 +26,7 @@ from __future__ import annotations
 # Supported providers and their model menus
 # ---------------------------------------------------------------------------
 
-PROVIDERS: list[str] = ["OpenAI", "Anthropic"]
+PROVIDERS: list[str] = ["OpenAI", "Anthropic", "Google"]
 
 PROVIDER_MODELS: dict[str, list[str]] = {
     "OpenAI": [
@@ -41,12 +41,19 @@ PROVIDER_MODELS: dict[str, list[str]] = {
         "claude-sonnet-4-6",
         "claude-haiku-4-5",
     ],
+    "Google": [
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+    ],
 }
 
 # Environment variable name that holds the API key for each provider
 API_KEY_ENV_VARS: dict[str, str] = {
     "OpenAI": "OPENAI_API_KEY",
     "Anthropic": "ANTHROPIC_API_KEY",
+    "Google": "GOOGLE_API_KEY",
 }
 
 
@@ -121,6 +128,91 @@ class AnthropicProvider(LLMProvider):
 
 
 # ---------------------------------------------------------------------------
+# Google
+# ---------------------------------------------------------------------------
+
+class GoogleProvider(LLMProvider):
+    _client = None
+
+    def _get_client(self):
+        if self._client is None:
+            from google import genai
+            GoogleProvider._client = genai.Client()
+        return self._client
+
+    def complete(self, model: str, system_prompt: str, user_message: str,
+                 max_tokens: int = 1500, temperature: float = 0.0,
+                 json_mode: bool = False) -> str:
+        """
+        Call a Gemini model.
+
+        Parameters
+        ----------
+        json_mode : bool
+            When True, set response_mime_type="application/json" so the model
+            returns a JSON object matching the prompt's requested format.
+            Use this for peer review calls. Leave False for free-text
+            contribution calls so the model returns plain prose.
+        """
+        from google.genai import types
+
+        config_kwargs: dict = {
+            "system_instruction": system_prompt,
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+        }
+        if json_mode:
+            config_kwargs["response_mime_type"] = "application/json"
+            # Disable safety categories that incorrectly block structured
+            # evaluation prompts (peer review scoring). These prompts contain
+            # no harmful content — the blocks are false positives from
+            # patterns like "scoring", "judging", "0 = bad, 1 = good".
+            from google.genai.types import HarmCategory, HarmBlockThreshold
+            config_kwargs["safety_settings"] = [
+                {"category": HarmCategory.HARM_CATEGORY_HARASSMENT,
+                 "threshold": HarmBlockThreshold.BLOCK_NONE},
+                {"category": HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                 "threshold": HarmBlockThreshold.BLOCK_NONE},
+                {"category": HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                 "threshold": HarmBlockThreshold.BLOCK_NONE},
+                {"category": HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                 "threshold": HarmBlockThreshold.BLOCK_NONE},
+            ]
+
+        config = types.GenerateContentConfig(**config_kwargs)
+
+        try:
+            response = self._get_client().models.generate_content(
+                model=model,
+                contents=user_message,
+                config=config,
+            )
+        except Exception as exc:
+            print(f"[GoogleProvider] API error: {exc}")
+            return f"[ERROR: {exc}]"
+
+        # Extract text robustly — response.text can be None/empty when the
+        # response is blocked. Go via candidates for a reliable path.
+        # content can be None (SAFETY block) → accessing .parts raises TypeError.
+        try:
+            text = response.candidates[0].content.parts[0].text
+            if text:
+                return text
+        except (IndexError, AttributeError, TypeError):
+            pass
+
+        # Fallback: surface the finish_reason as a legible error marker
+        try:
+            reason = response.candidates[0].finish_reason.name
+        except (IndexError, AttributeError, TypeError):
+            reason = "UNKNOWN"
+
+        if reason == "STOP":
+            return ""
+        return f"[BLOCKED: finish_reason={reason}]"
+
+
+# ---------------------------------------------------------------------------
 # Registry — one singleton per provider
 # ---------------------------------------------------------------------------
 
@@ -134,6 +226,8 @@ def get_provider(name: str) -> LLMProvider:
             _registry[name] = OpenAIProvider()
         elif name == "Anthropic":
             _registry[name] = AnthropicProvider()
+        elif name == "Google":
+            _registry[name] = GoogleProvider()
         else:
             raise ValueError(
                 f"Unknown provider '{name}'. "

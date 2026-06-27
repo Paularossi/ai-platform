@@ -160,7 +160,7 @@ with main_col:
                 with cols[i % 3]:
                     with st.container(border=True):
                         st.markdown(f"**{agent.get('name', f'Agent {i+1}')}**")
-                        st.caption(f"`{agent.get('provider', '?')}` / `{agent.get('model', '?')}`")
+                        st.caption(f"`{agent.get('provider', '?')}` / `{agent.get('model', '?')}` / temp={agent.get('temperature', 0.0)}")
                         custom_role = agent.get("custom_role", "").strip()
                         if custom_role:
                             st.caption(custom_role)

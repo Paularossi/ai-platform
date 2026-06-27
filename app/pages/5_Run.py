@@ -1,5 +1,5 @@
 """
-6_Run.py  -  Experiment runner
+5_Run.py  -  Experiment runner
 
 Streams the gossip protocol live, item by item, agent by agent.
 Shows a live feed of each agent turn, then a per-item results table,
@@ -27,12 +27,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.agent import Agent
-from core.hub import CommunicationHub
-from core.protocols.gossip import GossipProtocol
-from core.protocols.crowd import CrowdProtocol
-from core.orchestrator import Orchestrator
-from core.ecu import EcuLedger, PeerReviewRound, CoalitionTracker, DEFAULT_DIMENSIONS
+from core.ecu import PeerReviewRound
+from core.runner import build_agents, build_ecu_components, build_hub, build_item_data, build_peer_reviewer, build_protocol, collect_result, results_to_df
 
 st.set_page_config(page_title="Run Experiment", page_icon="🚀", layout="wide")
 
@@ -55,84 +51,6 @@ st.sidebar.markdown("""
 
 def get_config() -> dict:
     return st.session_state.get("experiment_config", {})
-
-
-def build_agents(cfg: dict) -> list[Agent]:
-    return [Agent(a, cfg) for a in cfg.get("agents", [])]
-
-
-def build_protocol(agents: list[Agent], cfg: dict,
-                   peer_reviewer=None, coalition_tracker=None, orchestrator=None):
-    """Return the correct protocol instance based on the configured setting."""
-    setting = cfg.get("protocol", {}).get("setting", "Simultaneous")
-    if setting in ("Simultaneous", "Crowd (parallel)"):
-        return CrowdProtocol(agents, cfg, peer_reviewer=peer_reviewer,
-                             coalition_tracker=coalition_tracker,
-                             orchestrator=orchestrator)
-    elif setting in ("Sequential", "Gossip (sequential)"):
-        return GossipProtocol(agents, cfg, peer_reviewer=peer_reviewer,
-                              coalition_tracker=coalition_tracker,
-                              orchestrator=orchestrator)
-    raise ValueError(f"Unknown protocol setting: '{setting}'")
-
-
-def build_item_data(row: pd.Series, column_mapping: dict) -> dict:
-    """Build the item_data dict from a dataframe row using the column mapping."""
-    return {
-        field_name: str(row[col_name])
-        for field_name, col_name in column_mapping.items()
-        if col_name and col_name != "- not mapped -" and col_name in row.index
-    }
-
-
-def results_to_df(results: list[dict]) -> pd.DataFrame:
-    """Flatten results into a wide DataFrame. One row per item."""
-    rows = []
-    for r in results:
-        row: dict[str, Any] = {
-            "item_id": r["item_id"],
-            "num_turns": r["num_turns"],
-            "originator": r["originator_name"],
-        }
-
-        # Coalition outcome
-        coalition_hist = r.get("coalition_history", {}).get("history", [])
-        if coalition_hist:
-            last = coalition_hist[-1]
-            row["coalition_final"] = ", ".join(last.get("coalition", [])) or "none"
-            row["coalition_size"] = last.get("size", 0)
-            row["coalition_reached"] = last.get("size", 0) >= 2
-        else:
-            row["coalition_final"] = "—"
-            row["coalition_size"] = 0
-            row["coalition_reached"] = False
-
-        # ECU final balances
-        for agent, bal in r.get("ecu_balances", {}).items():
-            row[f"ecu_{agent}"] = round(bal, 4)
-
-        # Per-agent mean peer scores from last round
-        pr_log = r.get("peer_review_log", [])
-        if pr_log:
-            last_cycle = max(p["cycle"] for p in pr_log)
-            last_round = [p for p in pr_log if p["cycle"] == last_cycle]
-            score_sums: dict[str, dict[str, float]] = {}
-            score_counts: dict[str, int] = {}
-            for review in last_round:
-                for reviewed, dim_scores in review.get("scores", {}).items():
-                    if reviewed not in score_sums:
-                        score_sums[reviewed] = {}
-                        score_counts[reviewed] = 0
-                    score_counts[reviewed] += 1
-                    for dim, score in dim_scores.items():
-                        score_sums[reviewed][dim] = score_sums[reviewed].get(dim, 0) + score
-            for agent, sums in score_sums.items():
-                n = score_counts[agent]
-                for dim, total in sums.items():
-                    row[f"pr_{agent}_{dim}"] = round(total / n, 4)
-
-        rows.append(row)
-    return pd.DataFrame(rows)
 
 
 # ---------- page ----------
@@ -277,21 +195,22 @@ if not launch:
 st.session_state.pop("run_results", None)
 
 # ── Set API keys if provided ──────────────────────────────────────────────────
-from core.providers import API_KEY_ENV_VARS as _KEY_VARS
 for _provider, _key in api_keys.items():
     if _key:
-        _env = _KEY_VARS.get(_provider, f"{_provider.upper()}_API_KEY")
+        _env = API_KEY_ENV_VARS.get(_provider, f"{_provider.upper()}_API_KEY")
         os.environ[_env] = _key
 
 # ── Build agents ──────────────────────────────────────────────────────────────
 agents = build_agents(cfg)
 agent_names = [a.name for a in agents]
 visibility_mode = proto.get("visibility_mode", "Previous round")
-review_depth = proto.get("review_depth", "previous_round")
+review_depth = proto.get("review_depth", "Previous Round")
 
 # ── Diagnostics ───────────────────────────────────────────────────────────────
 with st.expander("🔍 Pre-run diagnostics", expanded=False):
-    st.markdown(f"**Agents:** {[a.name for a in agents]}")
+    st.markdown("**Agents:**")
+    for a in agents:
+        st.caption(f"• **{a.name}** — {a.provider} / {a.model} / temp={a.temperature}")
     st.markdown(f"**Visibility mode: ()** {visibility_mode}")
     st.markdown(f"**Peer review depth: ()** {review_depth}")
 
@@ -308,22 +227,8 @@ with st.expander("🔍 Pre-run diagnostics", expanded=False):
         )
         st.code(preview, language=None)
 
-# ── Build ECU peer reviewer and ledger (if enabled) ───────────────────────────
-ecu_cfg = cfg.get("ecu", {})
-ecu_enabled = ecu_cfg.get("enabled", False)
-ecu_info_condition = ecu_cfg.get("info_condition", "opaque")
-include_self_assessment = ecu_cfg.get("include_self_assessment", False)
-coalition_threshold = float(ecu_cfg.get("coalition_threshold", 0.6))
-
-peer_reviewer: PeerReviewRound | None = None
-if ecu_enabled:
-    dim_configs = ecu_cfg.get("dimensions") or DEFAULT_DIMENSIONS
-    active_dims = [d for d in DEFAULT_DIMENSIONS if d["name"] in {dd["name"] for dd in dim_configs}]
-    peer_reviewer = PeerReviewRound(
-        dimensions=active_dims,
-        include_self_assessment=include_self_assessment,
-        review_depth=review_depth,
-    )
+# ── Build shared peer reviewer (reused across items, one per experiment) ─────
+peer_reviewer: PeerReviewRound | None = build_peer_reviewer(cfg, review_depth)
 
 # ── Slice dataset ─────────────────────────────────────────────────────────────
 subset = df.head(int(n_items)).reset_index(drop=True)
@@ -352,47 +257,16 @@ for item_idx, row in subset.iterrows():
 
     item_data = build_item_data(row, column_mapping)
 
-    # Build a fresh ledger, coalition tracker, and orchestrator per item
-    item_ledger: EcuLedger | None = None
-    item_coalition: CoalitionTracker | None = None
-    item_orchestrator: Orchestrator | None = None
-    if ecu_enabled and peer_reviewer:
-        dim_configs = ecu_cfg.get("dimensions") or DEFAULT_DIMENSIONS
-        ecu_weights = {d["name"]: float(d.get("weight", 1.0)) for d in dim_configs}
-        sw_weights = {d["name"]: float(d.get("sw_weight", 1.0)) for d in dim_configs}
-        active_dims = [d for d in DEFAULT_DIMENSIONS if d["name"] in ecu_weights]
-        item_ledger = EcuLedger(
-            agent_names=agent_names,
-            dimensions=active_dims,
-            ecu_weights=ecu_weights,
-            sw_weights=sw_weights,
-            include_self_assessment=include_self_assessment,
-        )
-        item_coalition = CoalitionTracker(threshold=coalition_threshold)
-        if ecu_cfg.get("orchestrator_enabled", False):
-            item_orchestrator = Orchestrator(
-                update_every=int(ecu_cfg.get("orchestrator_every", 1)),
-                enabled=True,
-            )
-
-    # Build protocol fresh per item
+    item_ledger, item_coalition, item_orchestrator = build_ecu_components(
+        cfg, agent_names, review_depth
+    )
     protocol = build_protocol(
         agents, cfg,
         peer_reviewer=peer_reviewer,
         coalition_tracker=item_coalition,
         orchestrator=item_orchestrator,
     )
-
-    # Create hub for this item
-    hub = CommunicationHub(
-        item_id=item_id,
-        item_data=item_data,
-        visibility_mode=visibility_mode,
-        agent_names=agent_names,
-        ledger=item_ledger,
-        ecu_info_condition=ecu_info_condition,
-        review_depth=review_depth,
-    )
+    hub = build_hub(item_id, item_data, cfg, agent_names, item_ledger)
 
     # ── Live turn feed ─────────────────────────────────────────────────────
     with st.expander(f"📄 Item {item_idx + 1} / {len(subset)}  -  `{item_id}`", expanded=True):
@@ -464,17 +338,23 @@ for item_idx, row in subset.iterrows():
                                 row_d = {"Agent": reviewed}
                                 for d in dim_names:
                                     row_d[d] = round(dim_scores.get(d, 0), 2)
-                                just = review.coalition_justifications.get(reviewed, "")
-                                if just:
-                                    row_d["Justification"] = just
+                                row_d["Justification"] = review.justifications.get(reviewed, "")
                                 rows.append(row_d)
                             if review.self_scores:
                                 self_row = {"Agent": "*(self)*"}
                                 for d in dim_names:
                                     self_row[d] = round(review.self_scores.get(d, 0), 2)
+                                self_row["Justification"] = ""
                                 rows.append(self_row)
 
-                            st.dataframe(_pd.DataFrame(rows), hide_index=True, width="content")
+                            st.dataframe(
+                                _pd.DataFrame(rows),
+                                hide_index=True,
+                                use_container_width=True,
+                                column_config={
+                                    "Justification": st.column_config.TextColumn(width="large"),
+                                },
+                            )
 
                         if review.importance_votes:
                             vote_parts = "  ·  ".join(
@@ -520,7 +400,7 @@ for item_idx, row in subset.iterrows():
                         last_c = item_coalition.history[-1]
                         c = last_c.get("coalition", [])
                         coalition_label = ", ".join(c) if len(c) >= 2 else "none"
-                        st.caption(f"Coalition (τ={coalition_threshold}): {coalition_label}")
+                        st.caption(f"Coalition (τ={item_coalition.threshold}): {coalition_label}")
 
                     if item_orchestrator:
                         cycle_updates = [u for u in item_orchestrator.history if u.cycle == event.cycle]
@@ -575,21 +455,7 @@ for item_idx, row in subset.iterrows():
                     "SW weights w^SW are fixed and never shown here."
                 )
 
-    # Store result
-    result = {
-        "item_id": item_id,
-        "num_turns": hub.num_submissions,
-        "originator_name": hub.originator_name,
-        "ecu_balances": hub.ecu_balances,
-        "coalition_history": item_coalition.to_dict() if item_coalition else {},
-        "orchestrator": item_orchestrator.to_dict() if item_orchestrator else {},
-        "ecu_ledger": item_ledger.to_dict() if item_ledger else {},
-        "social_welfare_history": item_ledger.social_welfare_history if item_ledger else [],
-        "log": [o.to_dict() for o in hub.log],
-        "peer_review_log": [p.to_dict() for p in hub.peer_review_log],
-        "prompt_log": hub.prompt_log,
-    }
-    all_results.append(result)
+    all_results.append(collect_result(hub, item_ledger, item_coalition, item_orchestrator))
 
     status_row: dict = {
         "Item": item_id,
@@ -623,4 +489,5 @@ _show_results(all_results, cfg)
 _show_nav_buttons()
 
 # TODO:
-# - check for convergence -> if coalition is formed then stop ? 
+# - check for convergence -> if coalition is formed then stop ?
+# - gemini not working properly, either fix or remove (importance votes and justifications are not returned)

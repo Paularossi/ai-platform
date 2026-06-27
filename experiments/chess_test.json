@@ -1,18 +1,18 @@
 {
   "meta": {
-    "saved_at": "2026-06-09T10:22:42.369000Z",
+    "saved_at": "2026-06-27T17:43:23.590988+02:00",
     "app_version": "0.1"
   },
   "overview": {
     "name": "chess",
-    "author": "paula",
-    "protocol_id": "0.1"
+    "author": "Paula",
+    "protocol_id": "1"
   },
   "task": {
     "description": "Who is the greatest chess player of all times?"
   },
   "instructions": {
-    "base_instructions": "You are a chess enthusiast participating in a structured deliberation.\nWrite exactly one paragraph (50-150 words) arguing from your assigned perspective.",
+    "base_instructions": "You are a chess enthusiast participating in a structured deliberation. Write exactly one paragraph (50-150 words) arguing from your assigned perspective. Be open to others' opinions.",
     "guideline_notes": ""
   },
   "agent_prompt_overrides": {
@@ -24,13 +24,15 @@
       "name": "Male fan",
       "provider": "OpenAI",
       "model": "gpt-4o",
+      "temperature": 0.1,
       "role": "Custom",
       "custom_role": "You believe chess is a male-dominated sport, but you are willing to argue."
     },
     {
       "name": "Female fan",
-      "provider": "OpenAI",
-      "model": "gpt-4o",
+      "provider": "Anthropic",
+      "model": "claude-sonnet-4-6",
+      "temperature": 0.05,
       "role": "Custom",
       "custom_role": "You believe since chess is not a physical sport, there shouldn't be a distinction between males and females in chess, but you are willing to argue."
     }
@@ -39,11 +41,11 @@
     "setting": "Simultaneous",
     "supervision_mode": "Unsupervised",
     "visibility_mode": "Previous round",
-    "review_depth": "previous_round",
+    "review_depth": "Previous Round",
     "order_type": "Fixed",
     "initializer_agent": "Agent 1",
     "judge_agent": "Agent 3",
-    "max_cycles": 6,
+    "max_cycles": 5,
     "stopping_rule": "Either"
   },
   "ecu": {
@@ -53,7 +55,7 @@
     "coalition_threshold": 0.7,
     "orchestrator_enabled": true,
     "orchestrator_step_size": 0.1,
-    "orchestrator_every": 2,
+    "orchestrator_every": 1,
     "dimensions": [
       {
         "name": "depth_breadth",
@@ -70,12 +72,6 @@
       {
         "name": "clarity",
         "label": "Clarity",
-        "weight": 1.0,
-        "sw_weight": 0.8
-      },
-      {
-        "name": "completeness",
-        "label": "Completeness",
         "weight": 1.0,
         "sw_weight": 0.8
       },

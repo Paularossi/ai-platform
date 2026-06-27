@@ -53,7 +53,7 @@ def restore_draft(loaded: dict) -> None:
     st.session_state.interaction_setting = proto.get("setting", "Simultaneous")
     st.session_state.supervision_mode = proto.get("supervision_mode", "Unsupervised")
     st.session_state.visibility_mode = proto.get("visibility_mode", "Previous round")
-    st.session_state.review_depth = proto.get("review_depth", "previous_round")
+    st.session_state.review_depth = proto.get("review_depth", "Previous Round")
     st.session_state.order_type = proto.get("order_type", "Fixed")
     st.session_state.max_cycles = proto.get("max_cycles", 5)
     st.session_state.stopping_rule = proto.get("stopping_rule", "Either")

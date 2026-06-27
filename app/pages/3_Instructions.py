@@ -162,6 +162,7 @@ with main_col:
         custom_role_text = preview_cfg.get("custom_role", "").strip()
         effective_role = custom_role_text if raw_role == "Custom" and custom_role_text else raw_role
 
+        ecu_cfg = st.session_state.experiment_config.get("ecu", {})
         system_prompt = _build_system_prompt(
             agent_name=preview_agent or "Agent",
             agent_role=effective_role,
@@ -169,19 +170,28 @@ with main_col:
             guideline_notes=st.session_state.get("guideline_notes", ""),
             agent_overrides=st.session_state.get("agent_prompt_overrides", {}),
             questions=[],
+            ecu_info_condition=ecu_cfg.get("info_condition", "opaque"),
+            ecu_dimensions=ecu_cfg.get("dimensions", []),
         )
         st.markdown("**System prompt:**")
         st.code(system_prompt, language=None)
 
         topic = st.session_state.get("task_description", "").strip() or "{deliberation topic/question}"
+        phi1 = st.session_state.get("visibility_mode", "Previous round")
+        if phi1 == "Full history":
+            history_header = "=== Contribution history ==="
+            history_note = "← all rounds shown per agent"
+        else:
+            history_header = "=== Previous round ==="
+            history_note = "← shown from round 2 onwards (φ₁: Previous round)"
         st.markdown("**User message structure:**")
         st.code(
             f"topic: {topic}\n\n"
-            "=== Previous round ===       ← shown from round 2 onwards\n"
+            f"{history_header}       {history_note}\n"
             "Contributions:\n"
             "  [Agent 1]: ...\n"
             "  [Agent 2]: ...\n"
-            "Peer review scores (average received):\n"
+            "Peer review scores (average received, last round):\n"
             "  Agent 1: depth_breadth: 0.xx, ...\n"
             "=== Your turn ===",
             language=None,
