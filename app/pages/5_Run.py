@@ -99,13 +99,15 @@ with st.container(border=True):
         api_keys: dict[str, str] = {}
         for provider in used_providers:
             env_var = API_KEY_ENV_VARS.get(provider, f"{provider.upper()}_API_KEY")
-            api_keys[provider] = st.text_input(
-                f"{provider} API key",
-                type="password",
-                value=os.environ.get(env_var, ""),
-                key=f"api_key_{provider}",
-                help=f"Leave blank if {env_var} is already set in your environment.",
-            )
+            if os.environ.get(env_var):
+                st.success(f"{provider} API key configured ✓", icon="🔑")
+                api_keys[provider] = ""
+            else:
+                api_keys[provider] = st.text_input(
+                    f"{provider} API key",
+                    type="password",
+                    key=f"api_key_{provider}",
+                )
 
 proto = cfg.get("protocol", {})
 c1, c2, c3, c4 = st.columns([5, 2, 2, 3])
