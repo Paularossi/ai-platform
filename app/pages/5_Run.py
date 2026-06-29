@@ -94,7 +94,7 @@ with st.container(border=True):
         )
 
     with col2:
-        from core.providers import API_KEY_ENV_VARS
+        from core.providers import API_KEY_ENV_VARS, reset_provider
         used_providers = sorted({a.get("provider", "OpenAI") for a in agents_cfg})
         api_keys: dict[str, str] = {}
         for provider in used_providers:
@@ -199,6 +199,7 @@ for _provider, _key in api_keys.items():
     if _key:
         _env = API_KEY_ENV_VARS.get(_provider, f"{_provider.upper()}_API_KEY")
         os.environ[_env] = _key
+        reset_provider(_provider)
 
 # ── Build agents ──────────────────────────────────────────────────────────────
 agents = build_agents(cfg)

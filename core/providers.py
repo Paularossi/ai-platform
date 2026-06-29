@@ -80,12 +80,13 @@ class LLMProvider:
 # ---------------------------------------------------------------------------
 
 class OpenAIProvider(LLMProvider):
-    _client = None
+    def __init__(self):
+        self._client = None
 
     def _get_client(self):
         if self._client is None:
             from openai import OpenAI
-            OpenAIProvider._client = OpenAI()
+            self._client = OpenAI()
         return self._client
 
     def complete(self, model, system_prompt, user_message,
@@ -107,12 +108,13 @@ class OpenAIProvider(LLMProvider):
 # ---------------------------------------------------------------------------
 
 class AnthropicProvider(LLMProvider):
-    _client = None
+    def __init__(self):
+        self._client = None
 
     def _get_client(self):
         if self._client is None:
             import anthropic
-            AnthropicProvider._client = anthropic.Anthropic()
+            self._client = anthropic.Anthropic()
         return self._client
 
     def complete(self, model, system_prompt, user_message,
@@ -132,12 +134,13 @@ class AnthropicProvider(LLMProvider):
 # ---------------------------------------------------------------------------
 
 class GoogleProvider(LLMProvider):
-    _client = None
+    def __init__(self):
+        self._client = None
 
     def _get_client(self):
         if self._client is None:
             from google import genai
-            GoogleProvider._client = genai.Client()
+            self._client = genai.Client()
         return self._client
 
     def complete(self, model: str, system_prompt: str, user_message: str,
@@ -217,6 +220,11 @@ class GoogleProvider(LLMProvider):
 # ---------------------------------------------------------------------------
 
 _registry: dict[str, LLMProvider] = {}
+
+
+def reset_provider(name: str) -> None:
+    """Evict the cached provider instance so the next call rebuilds with the current env key."""
+    _registry.pop(name, None)
 
 
 def get_provider(name: str) -> LLMProvider:
