@@ -10,17 +10,15 @@ import pandas as pd
 import streamlit as st
 from components.utils import restore_draft
 
-st.set_page_config(page_title="Review Experiment", page_icon="🧠", layout="wide")
 
 st.sidebar.title("Experiment Builder")
-st.sidebar.caption("Step 4 of 4")
+st.sidebar.caption("Step 3 of 3")
 st.sidebar.progress(1.0)
 st.sidebar.markdown("""
 **Steps**
-1. Overview
-2. Agents
-3. Instructions & topic
-4. Review
+1. Agents
+2. Instructions & topic
+3. **Review ← you are here**
 """)
 
 st.title("Review & Launch")
@@ -58,7 +56,6 @@ def build_draft() -> dict:
         "overview": cfg.get("overview", {
             "name": st.session_state.get("exp_name", ""),
             "author": st.session_state.get("author", ""),
-            "protocol_id": st.session_state.get("protocol_id", ""),
         }),
         "task": cfg.get("task", {"description": st.session_state.get("task_description", "")}),
         "instructions": cfg.get("instructions", {
@@ -104,10 +101,9 @@ with main_col:
         st.subheader("1. Overview")
         ov = draft["overview"]
         topic = draft["task"].get("description", "").strip()
-        c1, c2, c3 = st.columns([2.5, 2.5, 1.2])
+        c1, c2 = st.columns(2)
         c1.markdown(f"**Name**\n\n{val(ov.get('name'))}")
         c2.markdown(f"**Author**\n\n{val(ov.get('author'))}")
-        c3.markdown(f"**Version**\n\n{val(ov.get('protocol_id'))}")
         st.divider()
         st.markdown("**Deliberation topic / question**")
         st.info(topic or "No topic set.")
@@ -143,7 +139,7 @@ with main_col:
             dims = ecu.get("dimensions", [])
             if dims:
                 dim_str = "  ·  ".join(
-                    f"{d['label']}: SW={d.get('sw_weight', 1.0)}, ECU={d.get('weight', 1.0)}"
+                    f"{d['label']}: $w^{{SW}}$={d.get('sw_weight', 1.0)}, $w^{{ECU}}$={d.get('weight', 1.0)}"
                     for d in dims
                 )
                 st.caption(f"Weights: {dim_str}")

@@ -2,8 +2,6 @@
 
 import streamlit as st
 
-st.set_page_config(page_title="Agent Setup", page_icon="🧠", layout="wide")
-
 
 # ---------- helpers ----------
 def init_agent_config():
@@ -24,6 +22,12 @@ def init_agent_config():
             "judge_agent": "Agent 3",
             "max_cycles": 5,
             "stopping_rule": "Either",
+        }
+    # Ensure overview is preserved if coming from Main
+    if "overview" not in st.session_state.experiment_config:
+        st.session_state.experiment_config["overview"] = {
+            "name": st.session_state.get("exp_name", ""),
+            "author": st.session_state.get("author", ""),
         }
 
 def sync_agents_to_config():
@@ -74,6 +78,7 @@ def init_agent_state():
                     "name": "Agent 3",
                     "provider": "Anthropic",
                     "model": "claude-opus-4-8",
+                    "temperature": 0.0,
                     "role": "Custom",
                     "custom_role": "",
                 },
@@ -87,6 +92,7 @@ def init_agent_state():
 
     if "visibility_mode" not in st.session_state:
         st.session_state.visibility_mode = protocol.get("visibility_mode", "Previous round")
+        
     if "review_depth" not in st.session_state:
         st.session_state.review_depth = protocol.get("review_depth", "Previous Round")
 
@@ -130,14 +136,13 @@ init_agent_state()
 
 # ---------- sidebar ----------
 st.sidebar.title("Experiment Builder")
-st.sidebar.caption("Step 2 of 4")
-st.sidebar.progress(2 / 4)
+st.sidebar.caption("Step 1 of 3")
+st.sidebar.progress(1 / 3)
 st.sidebar.markdown("""
 **Steps**
-1. Overview
-2. Agents
-3. Instructions & topic
-4. Review
+1. **Agents ← you are here**
+2. Instructions & topic
+3. Review
 """)
 
 st.title("Agent Setup")
@@ -347,7 +352,7 @@ with main_col:
         st.subheader("5. ECU quality dimensions")
         st.caption(
             "Define the quality dimensions used to score each agent contribution. "
-            "SW weights w^SW are fixed social-planner valuations; ECU weights w^ECU are "
+            "SW weights $w^{SW}$ are fixed social-planner valuations; ECU weights $w^{ECU}$ are "
             "variable incentive weights used for agent payouts and Orchestrator updates."
         )
 
@@ -422,8 +427,8 @@ with main_col:
             st.divider()
             st.markdown("**Orchestrator (Social Welfare)**")
             st.caption(
-                "The Orchestrator adjusts only the ECU incentive weights w^ECU. "
-                "Social welfare is computed with fixed SW weights w^SW."
+                "The Orchestrator adjusts only the ECU incentive weights $w^{ECU}$. "
+                "Social welfare is computed with fixed SW weights $w^{SW}$."
             )
 
             if "ecu_orchestrator_enabled" not in st.session_state:
@@ -466,7 +471,7 @@ with main_col:
                         value=float(dim.get("sw_weight", 1.0)),
                         step=0.1,
                         key=f"sw_w_{dim['name']}",
-                        help="Fixed social-planner valuation w^SW_q.",
+                        help="Fixed social-planner valuation $w^{SW}_q$.",
                     )
                 with c3:
                     dim["weight"] = st.number_input(
@@ -475,12 +480,12 @@ with main_col:
                         value=float(dim.get("weight", 1.0)),
                         step=0.1,
                         key=f"ecu_w_{dim['name']}",
-                        help="Variable incentive weight w^ECU_q used for ECU payouts.",
+                        help="Variable incentive weight $w^{ECU}_q$ used for ECU payouts.",
                     )
 
             total_sw = sum(float(d.get("sw_weight", 1.0)) for d in dims)
             total_ecu = sum(float(d.get("weight", 1.0)) for d in dims)
-            st.caption(f"Total SW weight: {total_sw:.1f} · Total ECU weight: {total_ecu:.1f}")
+            st.caption(f"Total $w^{{SW}}$: {total_sw:.1f} · Total $w^{{ECU}}$: {total_ecu:.1f}")
 
         # Persist to experiment_config
         st.session_state.experiment_config["ecu"] = {
@@ -494,18 +499,16 @@ with main_col:
             "dimensions": st.session_state.ecu_dimensions,
         }
 
-    st.info("Next: define agent instructions →")
-
-    nav1, nav2, nav3 = st.columns([2, 2, 0.8])
+    nav1, nav2, nav3 = st.columns([2, 2, 2])
     with nav1:
-        if st.button("<- Back"):
-            st.switch_page("pages/1_Welcome.py")
+        if st.button("← Back"):
+            st.switch_page("Main.py")
     with nav2:
-        if st.button("Save draft"):
+        if st.button("Save draft", use_container_width=True):
             sync_agents_to_config()
-            st.success("Agent setup saved.")
+            st.toast("Agent setup saved.")
     with nav3:
-        if st.button("Next ->"):
+        if st.button("Next →", type="primary", use_container_width=True):
             sync_agents_to_config()
             st.switch_page("pages/3_Instructions.py")
     
@@ -534,12 +537,3 @@ with summary_col:
                 f"- **{agent['name']}** - {agent['provider']} / {agent['model']} / {agent['role']}"
             )
 
-    with st.container(border=True):
-        st.subheader("Notes")
-        st.markdown(
-            """
-- roles define behavior, not personality
-- visibility controls what each agent can see
-- stopping rules define when the protocol ends
-"""
-        )

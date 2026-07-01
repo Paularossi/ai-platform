@@ -1,95 +1,108 @@
-"""Step 1 — Experiment overview."""
+"""Home — landing page with two paths: new experiment or load draft."""
+
+import json
 
 import streamlit as st
-
-st.set_page_config(page_title="Multi-Agent Platform", page_icon="🧠", layout="wide")
-
-
-def init_experiment_config():
-    if "experiment_config" not in st.session_state:
-        st.session_state.experiment_config = {
-            "overview": {"name": "", "author": "", "protocol_id": ""},
-            "task": {"description": ""},
-            "questions": [],
-            "instructions": {"base_instructions": "", "guideline_notes": ""},
-        }
+from components.utils import restore_draft
 
 
-def init_state():
-    cfg = st.session_state.experiment_config
-    if "exp_name" not in st.session_state:
-        st.session_state.exp_name = cfg["overview"]["name"]
-    if "author" not in st.session_state:
-        st.session_state.author = cfg["overview"]["author"]
-    if "protocol_id" not in st.session_state:
-        st.session_state.protocol_id = cfg["overview"]["protocol_id"]
-    if "task_description" not in st.session_state:
-        st.session_state.task_description = cfg["task"]["description"]
+def clear_experiment_state():
+    keys_to_clear = [
+        "experiment_config", "input_fields", "question_sets",
+        "base_instructions", "guideline_notes", "agent_prompt_overrides",
+        "agents", "num_agents", "interaction_setting",
+        "supervision_mode", "visibility_mode", "order_type", "max_cycles",
+        "stopping_rule", "initializer_agent", "judge_agent",
+        "exp_name", "author", "task_category", "modalities",
+        "task_description", "dataset_df", "dataset_filename",
+        "column_mapping", "dataset_ready", "run_results",
+    ]
+    for key in keys_to_clear:
+        st.session_state.pop(key, None)
 
 
-def sync_to_config():
-    st.session_state.experiment_config["overview"] = {
-        "name": st.session_state.get("exp_name", ""),
-        "author": st.session_state.get("author", ""),
-        "protocol_id": st.session_state.get("protocol_id", ""),
-    }
-    st.session_state.experiment_config["task"] = {
-        "description": st.session_state.get("task_description", ""),
-    }
+st.title("🧠 Multi-Agent Lab")
+st.caption("A configurable platform for studying multi-agent AI interaction, consensus formation, and bias in structured tasks.")
 
+st.divider()
 
-init_experiment_config()
-init_state()
+left, right = st.columns(2, gap="large")
 
-# ---------- sidebar ----------
-st.sidebar.title("Experiment Builder")
-st.sidebar.caption("Step 1 of 4")
-st.sidebar.progress(1 / 4)
-st.sidebar.markdown("""
-**Steps**
-1. Overview
-2. Agents
-3. Instructions & topic
-4. Review
-""")
-
-st.title("Experiment Overview")
-st.caption("Name your deliberation experiment.")
-
-main_col, summary_col = st.columns([2.1, 1], gap="large")
-
-with main_col:
-
+with left:
     with st.container(border=True):
-        st.subheader("1. Overview")
-        st.text_input(
+        st.subheader("Start new experiment")
+        st.markdown("Set up a new experiment from scratch using the step-by-step builder.")
+        st.markdown("""
+**Steps**
+1. Agent setup
+2. Instructions & topic
+3. Review & launch
+""")
+        name_input = st.text_input(
             "Experiment name",
             placeholder="e.g. Congestion pricing deliberation — pilot",
-            key="exp_name",
+            key="main_exp_name",
         )
-        c1, c2 = st.columns(2)
-        with c1:
-            st.text_input("Author(s)", placeholder="e.g. Paula, Freija", key="author")
-        with c2:
-            st.text_input("Version", placeholder="e.g. v0.1", key="protocol_id")
-
-    nav1, nav2, _ = st.columns([2, 2, 4])
-    with nav1:
-        if st.button("Save draft"):
-            sync_to_config()
-            st.switch_page("pages/4_Review.py")
-    with nav2:
-        if st.button("Next →"):
-            sync_to_config()
+        author_input = st.text_input(
+            "Author(s)",
+            placeholder="e.g. Paula, Freija",
+            key="main_author",
+        )
+        st.write("")
+        if st.button("→ Start", type="primary", use_container_width=True):
+            clear_experiment_state()
+            st.session_state.experiment_config = {
+                "overview": {"name": name_input, "author": author_input},
+                "task": {"description": ""},
+                "questions": [],
+                "instructions": {"base_instructions": "", "guideline_notes": ""},
+            }
+            st.session_state.exp_name = name_input
+            st.session_state.author = author_input
             st.switch_page("pages/2_Agent Setup.py")
 
-
-with summary_col:
+with right:
     with st.container(border=True):
-        st.subheader("Summary")
-        st.markdown(f"**Name**  \n{st.session_state.get('exp_name') or '—'}")
-        st.markdown(f"**Author**  \n{st.session_state.get('author') or '—'}")
-        st.markdown(f"**Version**  \n{st.session_state.get('protocol_id') or '—'}")
-        st.divider()
-        st.markdown("**Topic**")
-        st.write(st.session_state.get("task_description") or "—")
+        st.subheader("Load existing experiment")
+        st.markdown(
+            "Upload a previously saved experiment JSON to restore all settings "
+            "and jump straight to the review page."
+        )
+
+        uploaded = st.file_uploader(
+            "Upload experiment JSON",
+            type=["json"],
+            key="main_draft_uploader",
+            label_visibility="collapsed",
+        )
+
+        if uploaded is not None:
+            try:
+                raw = uploaded.read()
+                loaded = json.loads(raw)
+                ov = loaded.get("overview", {})
+                exp_name = ov.get("name") or "Unnamed experiment"
+                author = ov.get("author") or "—"
+                protocol = loaded.get("protocol", {})
+                n_agents = len(loaded.get("agents", []))
+                saved_at = loaded.get("meta", {}).get("saved_at", "")
+
+                st.info(
+                    f"**{exp_name}**  \n"
+                    f"Author: {author}  ·  "
+                    f"{n_agents} agent(s)  ·  "
+                    f"Protocol: {protocol.get('setting', '—')}  \n"
+                    + (f"Saved: {saved_at[:10]}" if saved_at else ""),
+                    icon="📋",
+                )
+
+                if st.button("→ Load & review", type="primary", use_container_width=True):
+                    restore_draft(loaded)
+                    st.switch_page("pages/4_Review.py")
+
+            except Exception as e:
+                st.error(f"Could not read file: {e}")
+        else:
+            st.markdown("")
+            st.markdown("")
+            st.caption("No file selected yet.")

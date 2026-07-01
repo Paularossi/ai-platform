@@ -224,6 +224,13 @@ def _parse_deliberation(
             text = stripped[1:].strip() if stripped.startswith("-") else stripped
             cons.append(text)
         elif in_contribution:
+            # Skip Setext-style underline markers (e.g. "===" or "---" directly
+            # under a title line) — meaningless once lines are flattened below.
+            if re.fullmatch(r"[=\-]{3,}", stripped):
+                continue
+            # Strip leading Markdown heading markers (#, ##, ...) as some models open with a heading line. Since all lines are
+            # flattened into one paragraph below, a leading "#" would make the entire joined contribution render as one giant heading.
+            stripped = re.sub(r"^#{1,6}\s*", "", stripped)
             contribution_lines.append(stripped)
 
     # For text-only questions, also parse simple field: answer lines

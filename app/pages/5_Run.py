@@ -30,7 +30,6 @@ if str(ROOT) not in sys.path:
 from core.ecu import PeerReviewRound
 from core.runner import build_agents, build_ecu_components, build_hub, build_item_data, build_peer_reviewer, build_protocol, collect_result, results_to_df
 
-st.set_page_config(page_title="Run Experiment", page_icon="🚀", layout="wide")
 
 # ---------- sidebar ----------
 st.sidebar.title("Experiment Builder")
@@ -494,3 +493,10 @@ _show_nav_buttons()
 # TODO:
 # - check for convergence -> if coalition is formed then stop ?
 # - gemini not working properly, either fix or remove (importance votes and justifications are not returned)
+# - add reputation and weight the votes by reputation
+
+# - for the experimentation, we don't use a toy story but a real one, e.g. resilience
+# - let agents create new agents? so we provide a pre-prompt to an Agent 0 containing:
+# 1. creation of helpers
+# 2. criteria (for creating new agents?)
+# 3. a case for policy brief

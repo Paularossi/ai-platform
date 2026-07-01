@@ -12,17 +12,15 @@ if str(_ROOT) not in sys.path:
 
 from core.agent import _build_system_prompt
 
-st.set_page_config(page_title="Instructions", page_icon="🧠", layout="wide")
 
 st.sidebar.title("Experiment Builder")
-st.sidebar.caption("Step 3 of 4")
-st.sidebar.progress(3 / 4)
+st.sidebar.caption("Step 2 of 3")
+st.sidebar.progress(2 / 3)
 st.sidebar.markdown("""
 **Steps**
-1. Overview
-2. Agents
-3. Instructions & topic
-4. Review
+1. Agents
+2. **Instructions & topic ← you are here**
+3. Review
 """)
 
 st.title("Instructions & topic")
@@ -197,16 +195,16 @@ with main_col:
             language=None,
         )
 
-    nav1, nav2, nav3 = st.columns([2, 2, 0.8])
+    nav1, nav2, nav3 = st.columns([2, 2, 2])
     with nav1:
         if st.button("← Back"):
             st.switch_page("pages/2_Agent Setup.py")
     with nav2:
-        if st.button("Save draft"):
+        if st.button("Save draft", use_container_width=True):
             sync_to_config()
-            st.success("Saved.")
+            st.toast("Instructions saved.")
     with nav3:
-        if st.button("Next →"):
+        if st.button("Next →", type="primary", use_container_width=True):
             sync_to_config()
             st.switch_page("pages/4_Review.py")
 
