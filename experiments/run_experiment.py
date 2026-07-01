@@ -6,7 +6,7 @@ Generic batch runner — loads an experiment JSON file and runs every scenario.
 Usage
 -----
     python experiments/run_experiment.py experiments/chess_test.json
-    python experiments/run_experiment.py experiments/chess_test.json --dry-run
+    python experiments/run_experiment.py experiments/agent_zero_test.json
 
 Results land in experiments/results/<scenario_name>_<timestamp>.json
 A summary CSV is written to experiments/results/summary_<timestamp>.csv
@@ -31,7 +31,25 @@ Experiment JSON format
 The "base" section is identical to the draft JSON saved by the UI (Step 4 → Save draft),
 so you can design an experiment in the UI, save the draft, and use it here directly.
 
-API keys
+Log structure:
+result = {
+    "rounds": [...]                 ← read this first: roster, truncated contribution
+                                    previews, ECU/SW, coalition, Agent 0's reasoning,
+                                    roster edits, per round — compact, chronological
+    "final_brief": "...",
+    "ended_reason": "...",
+    "initial_roster": [...],
+    "final_ecu_balances": {...},
+    "final_ecu_weights": {...},
+    "debug": {                      ← only open this to trace a specific call
+        "full_contributions": [...] ← untruncated text, no duplicate raw_response
+        "peer_review_scores": [...] ← parsed scores only, no duplicate raw_response
+        "coalition_history": {...},
+        "ecu_ledger": {...},
+        "prompt_log": [...]         ← the one place with full prompts + raw responses
+    }
+}
+
 --------
 Set your API keys in the .env file before running.
 """
@@ -63,6 +81,7 @@ from core.runner import (
     collect_result,
     results_to_df,
 )
+from core.protocols.agent_zero_loop import run_agent_zero_experiment
 
 _AMS = ZoneInfo("Europe/Amsterdam")
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -77,6 +96,7 @@ def load_experiment(path: Path) -> tuple[dict, list[dict], dict]:
     - UI draft format: flat dict saved by the UI (no "base" wrapper); the
       embedded "protocol" block becomes a single scenario named "default".
     """
+    #path = Path("experiments/agent_zero_test.json")
     raw = json.loads(path.read_text(encoding="utf-8"))
 
     if "base" in raw:
@@ -91,9 +111,15 @@ def load_experiment(path: Path) -> tuple[dict, list[dict], dict]:
         scenario_name = raw.get("overview", {}).get("name", "default").replace(" ", "_").lower()
         scenarios = [{"name": scenario_name, "protocol": protocol}]
 
+    is_agent_zero = base.get("mode") == "agent_zero"
+
     if not scenarios:
-        raise ValueError(f"'{path.name}' has no scenarios and no embedded protocol.")
-    if not base.get("agents"):
+        if is_agent_zero:
+            # Agent 0 mode doesn't need a protocol override — one implicit scenario.
+            scenarios = [{"name": "agent_zero_run", "protocol": {}}]
+        else:
+            raise ValueError(f"'{path.name}' has no scenarios and no embedded protocol.")
+    if not is_agent_zero and not base.get("agents"):
         raise ValueError("'agents' is empty — add at least one agent.")
     if not base.get("task", {}).get("description", "").strip():
         raise ValueError("'task.description' is empty — set the deliberation topic.")
@@ -112,6 +138,33 @@ def build_cfg(base: dict, scenario: dict) -> dict:
 def run_scenario(base: dict, scenario: dict, dry_run: bool = False) -> dict:
     """Run one scenario and return its result dict."""
     cfg = build_cfg(base, scenario)
+
+    if cfg.get("mode") == "agent_zero":
+        max_rounds = cfg.get("agent_zero", {}).get("max_rounds", 10)
+
+        def _progress(round_summary: dict) -> None:
+            cycle = round_summary["cycle"]
+            roster = [a["name"] for a in round_summary["roster"]]
+            print(f"\n  round {cycle + 1}/{max_rounds}  ·  roster: {', '.join(roster)}", flush=True)
+
+            reasoning = round_summary["agent_zero_reasoning"].strip()
+            preview = (reasoning[:280] + "…") if len(reasoning) > 280 else reasoning
+            print(f"    Agent 0 reasoning: {preview}", flush=True)
+
+            if round_summary["agents_added"] or round_summary["agents_removed"]:
+                print(f"    Agent 0 roster edit: +{round_summary['agents_added']} "
+                      f"-{round_summary['agents_removed']}", flush=True)
+            for name, instr in round_summary["agent_instructions_issued"].items():
+                instr_preview = (instr[:150] + "…") if len(instr) > 150 else instr
+                print(f"    Agent 0 → {name}: {instr_preview}", flush=True)
+            if round_summary["end_debate"]:
+                print("    Agent 0: ending debate.", flush=True)
+
+        result = run_agent_zero_experiment(cfg, dry_run=dry_run, on_round=_progress)
+        result["scenario"] = scenario["name"]
+        result["protocol_config"] = cfg.get("protocol", {})
+        return result
+
     review_depth = cfg["protocol"].get("review_depth", "Previous Round")
 
     agents = build_agents(cfg)
@@ -165,9 +218,14 @@ def main() -> None:
 
     base, scenarios, meta = load_experiment(exp_path)
 
+    is_agent_zero = base.get("mode") == "agent_zero"
+
     print(f"Experiment : {meta.get('name', exp_path.stem)}")
     print(f"Author     : {meta.get('author', '—')}")
-    print(f"Agents     : {', '.join(a['name'] for a in base['agents'])}")
+    if is_agent_zero:
+        print(f"Mode       : agent_zero (roster chosen autonomously)")
+    else:
+        print(f"Agents     : {', '.join(a['name'] for a in base['agents'])}")
     print(f"Scenarios  : {len(scenarios)}")
     print(f"Dry run    : {args.dry_run}")
 
@@ -180,11 +238,18 @@ def main() -> None:
         proto = scenario["protocol"]
         print(f"\n{'='*60}")
         print(f"Scenario  : {name}")
-        print(f"  setting : {proto.get('setting')}")
-        print(f"  φ₁      : {proto.get('visibility_mode')}")
-        print(f"  φ₂      : {proto.get('review_depth')}")
-        print(f"  cycles  : {proto.get('max_cycles')}")
-        print(f" ECU visibility : {proto.get('ecu', {}).get('info_condition', False)}")
+        if is_agent_zero:
+            az = base.get("agent_zero", {})
+            print(f"  provider : {az.get('provider', '?')} / {az.get('model', '?')}")
+            print(f"  max_rounds       : {az.get('max_rounds', '?')}")
+            print(f"  max_agents       : {az.get('max_agents', '?')}")
+            print(f"  max_total_spawns : {az.get('max_total_spawns', '?')}")
+        else:
+            print(f"  setting : {proto.get('setting')}")
+            print(f"  φ₁      : {proto.get('visibility_mode')}")
+            print(f"  φ₂      : {proto.get('review_depth')}")
+            print(f"  cycles  : {proto.get('max_cycles')}")
+        print(f"  ECU visibility : {base.get('ecu', {}).get('info_condition', 'opaque')}")
 
         result = run_scenario(base, scenario, dry_run=args.dry_run)
         all_results.append(result)
@@ -196,13 +261,23 @@ def main() -> None:
         )
         print(f"  → saved {out_path.name}")
 
-        coalition_hist = result.get("coalition_history", {}).get("history", [])
-        coalition_str = "none"
-        if coalition_hist:
-            members = coalition_hist[-1].get("coalition", [])
-            coalition_str = ", ".join(members) if len(members) >= 2 else "none"
-        print(f"  turns={result['num_turns']}  coalition={coalition_str}  "
-              f"ecu={result.get('ecu_balances', {})}")
+        if result.get("mode") == "agent_zero":
+            last_round = result["rounds"][-1] if result.get("rounds") else {}
+            coalition = last_round.get("coalition", [])
+            coalition_str = ", ".join(coalition) if len(coalition) >= 2 else "none"
+            print(f"  turns={result['num_turns']}  coalition={coalition_str}  "
+                  f"ecu={result.get('final_ecu_balances', {})}")
+            print(f"  ended: {result.get('ended_reason')}")
+            if result.get("final_brief"):
+                print(f"  final brief:\n    {result['final_brief']}")
+        else:
+            coalition_hist = result.get("coalition_history", {}).get("history", [])
+            coalition_str = "none"
+            if coalition_hist:
+                members = coalition_hist[-1].get("coalition", [])
+                coalition_str = ", ".join(members) if len(members) >= 2 else "none"
+            print(f"  turns={result['num_turns']}  coalition={coalition_str}  "
+                  f"ecu={result.get('ecu_balances', {})}")
 
     summary_df = results_to_df(all_results)
     summary_df.insert(0, "scenario", [r["scenario"] for r in all_results])

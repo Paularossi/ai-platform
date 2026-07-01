@@ -1,108 +1,176 @@
-"""Home — landing page with two paths: new experiment or load draft."""
+"""Agent 0 mode — Setup: topic, Agent 0's own model, and advanced settings.
 
-import json
+This is the only configuration page. Agent 0 designs the roster, adapts it,
+steers agents, and ends the debate autonomously — there is no manual agent
+setup, protocol picker, or review step.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
 
 import streamlit as st
-from components.utils import restore_draft
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from core.ecu import DEFAULT_DIMENSIONS
+from core.providers import API_KEY_ENV_VARS, PROVIDER_MODELS, PROVIDERS
+
+DEFAULT_BASE_INSTRUCTIONS = (
+    "Write exactly one paragraph (50-150 words) arguing from your assigned perspective. "
+    "Be specific — cite mechanisms, consequences, or evidence. Do not summarise other agents' views."
+)
 
 
-def clear_experiment_state():
-    keys_to_clear = [
-        "experiment_config", "input_fields", "question_sets",
-        "base_instructions", "guideline_notes", "agent_prompt_overrides",
-        "agents", "num_agents", "interaction_setting",
-        "supervision_mode", "visibility_mode", "order_type", "max_cycles",
-        "stopping_rule", "initializer_agent", "judge_agent",
-        "exp_name", "author", "task_category", "modalities",
-        "task_description", "dataset_df", "dataset_filename",
-        "column_mapping", "dataset_ready", "run_results",
-    ]
-    for key in keys_to_clear:
-        st.session_state.pop(key, None)
+def init_state() -> None:
+    defaults = {
+        "az_topic": "",
+        "az_provider": "Anthropic",
+        "az_model": "claude-sonnet-4-6",
+        "az_base_instructions": DEFAULT_BASE_INSTRUCTIONS,
+        "az_guideline_notes": "",
+        "az_max_rounds": 10,
+        "az_max_agents": 6,
+        "az_max_total_spawns": 8,
+        "az_coalition_threshold": 0.6,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
-st.title("🧠 Multi-Agent Lab")
-st.caption("A configurable platform for studying multi-agent AI interaction, consensus formation, and bias in structured tasks.")
+init_state()
+
+st.title("🧠 Agent 0 — Autonomous Deliberation")
+st.caption(
+    "Give it a topic. Agent 0 designs the debating roster, adapts it round by round, "
+    "steers agents as needed, and ends the debate with a final policy brief — autonomously."
+)
 
 st.divider()
 
-left, right = st.columns(2, gap="large")
+with st.container(border=True):
+    st.subheader("Deliberation topic")
+    st.session_state.az_topic = st.text_area(
+        "Topic / question",
+        value=st.session_state.az_topic,
+        placeholder="Should the city introduce congestion charges on its inner ring road?",
+        height=100,
+        label_visibility="collapsed",
+    )
 
-with left:
-    with st.container(border=True):
-        st.subheader("Start new experiment")
-        st.markdown("Set up a new experiment from scratch using the step-by-step builder.")
-        st.markdown("""
-**Steps**
-1. Agent setup
-2. Instructions & topic
-3. Review & launch
-""")
-        name_input = st.text_input(
-            "Experiment name",
-            placeholder="e.g. Congestion pricing deliberation — pilot",
-            key="main_exp_name",
+with st.container(border=True):
+    st.subheader("Agent 0's model")
+    st.caption(
+        "Which LLM orchestrates the debate — proposes the roster, adds/removes agents, "
+        "steers them, and decides when to end. (The debating agents themselves are drawn "
+        "from OpenAI/gpt-4o and Anthropic/claude-sonnet-4-6.)"
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        st.session_state.az_provider = st.selectbox(
+            "Provider", PROVIDERS,
+            index=PROVIDERS.index(st.session_state.az_provider),
         )
-        author_input = st.text_input(
-            "Author(s)",
-            placeholder="e.g. Paula, Freija",
-            key="main_author",
-        )
-        st.write("")
-        if st.button("→ Start", type="primary", use_container_width=True):
-            clear_experiment_state()
-            st.session_state.experiment_config = {
-                "overview": {"name": name_input, "author": author_input},
-                "task": {"description": ""},
-                "questions": [],
-                "instructions": {"base_instructions": "", "guideline_notes": ""},
-            }
-            st.session_state.exp_name = name_input
-            st.session_state.author = author_input
-            st.switch_page("pages/2_Agent Setup.py")
-
-with right:
-    with st.container(border=True):
-        st.subheader("Load existing experiment")
-        st.markdown(
-            "Upload a previously saved experiment JSON to restore all settings "
-            "and jump straight to the review page."
+    with c2:
+        model_options = PROVIDER_MODELS.get(st.session_state.az_provider, [])
+        current_model = st.session_state.az_model if st.session_state.az_model in model_options else model_options[0]
+        st.session_state.az_model = st.selectbox(
+            "Model", model_options,
+            index=model_options.index(current_model),
         )
 
-        uploaded = st.file_uploader(
-            "Upload experiment JSON",
-            type=["json"],
-            key="main_draft_uploader",
-            label_visibility="collapsed",
+with st.expander("Advanced settings"):
+    st.markdown("**Instructions given to every debating agent**")
+    st.session_state.az_base_instructions = st.text_area(
+        "Base instructions",
+        value=st.session_state.az_base_instructions,
+        height=100,
+    )
+    st.session_state.az_guideline_notes = st.text_area(
+        "Guideline / definition notes (optional)",
+        value=st.session_state.az_guideline_notes,
+        height=70,
+        placeholder="Add definitions, scoring criteria, or factual context here.",
+    )
+
+    st.markdown("**Safety bounds** — enforced by the loop, independent of Agent 0's own judgement")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.session_state.az_max_rounds = st.number_input(
+            "Max rounds", min_value=1, max_value=50, value=st.session_state.az_max_rounds, step=1,
+        )
+    with c2:
+        st.session_state.az_max_agents = st.number_input(
+            "Max agents on roster", min_value=1, max_value=10, value=st.session_state.az_max_agents, step=1,
+        )
+    with c3:
+        st.session_state.az_max_total_spawns = st.number_input(
+            "Max total spawns", min_value=1, max_value=20, value=st.session_state.az_max_total_spawns, step=1,
+            help="Caps the cumulative number of agents ever created, including the initial roster.",
         )
 
-        if uploaded is not None:
-            try:
-                raw = uploaded.read()
-                loaded = json.loads(raw)
-                ov = loaded.get("overview", {})
-                exp_name = ov.get("name") or "Unnamed experiment"
-                author = ov.get("author") or "—"
-                protocol = loaded.get("protocol", {})
-                n_agents = len(loaded.get("agents", []))
-                saved_at = loaded.get("meta", {}).get("saved_at", "")
+    st.markdown("**Coalition**")
+    st.session_state.az_coalition_threshold = st.slider(
+        "Coalition threshold τ", min_value=0.0, max_value=1.0,
+        value=st.session_state.az_coalition_threshold, step=0.05,
+        help="Minimum mutual consensus score for two agents to be counted as a coalition.",
+    )
 
-                st.info(
-                    f"**{exp_name}**  \n"
-                    f"Author: {author}  ·  "
-                    f"{n_agents} agent(s)  ·  "
-                    f"Protocol: {protocol.get('setting', '—')}  \n"
-                    + (f"Saved: {saved_at[:10]}" if saved_at else ""),
-                    icon="📋",
-                )
-
-                if st.button("→ Load & review", type="primary", use_container_width=True):
-                    restore_draft(loaded)
-                    st.switch_page("pages/4_Review.py")
-
-            except Exception as e:
-                st.error(f"Could not read file: {e}")
+with st.container(border=True):
+    st.subheader("API keys")
+    used_providers = sorted({"OpenAI", "Anthropic", st.session_state.az_provider})
+    api_keys: dict[str, str] = {}
+    for provider in used_providers:
+        env_var = API_KEY_ENV_VARS.get(provider, f"{provider.upper()}_API_KEY")
+        if os.environ.get(env_var):
+            st.success(f"{provider} API key configured ✓", icon="🔑")
+            api_keys[provider] = ""
         else:
-            st.markdown("")
-            st.markdown("")
-            st.caption("No file selected yet.")
+            api_keys[provider] = st.text_input(
+                f"{provider} API key", type="password", key=f"az_api_key_{provider}",
+            )
+
+st.divider()
+
+topic_ready = bool(st.session_state.az_topic.strip())
+if not topic_ready:
+    st.warning("Enter a deliberation topic to continue.")
+
+if st.button("▶ Launch debate", type="primary", disabled=not topic_ready, use_container_width=True):
+    for provider, key in api_keys.items():
+        if key:
+            os.environ[API_KEY_ENV_VARS.get(provider, f"{provider.upper()}_API_KEY")] = key
+
+    st.session_state.experiment_config = {
+        "mode": "agent_zero",
+        "task": {"description": st.session_state.az_topic.strip()},
+        "instructions": {
+            "base_instructions": st.session_state.az_base_instructions,
+            "guideline_notes": st.session_state.az_guideline_notes,
+        },
+        "ecu": {
+            "enabled": True,
+            "info_condition": "opaque",
+            "include_self_assessment": False,
+            "coalition_threshold": st.session_state.az_coalition_threshold,
+            "orchestrator_enabled": False,
+            "dimensions": [
+                {"name": d["name"], "label": d["label"], "weight": 1.0, "sw_weight": 1.0}
+                for d in DEFAULT_DIMENSIONS
+            ],
+        },
+        "agent_zero": {
+            "provider": st.session_state.az_provider,
+            "model": st.session_state.az_model,
+            "max_rounds": int(st.session_state.az_max_rounds),
+            "max_agents": int(st.session_state.az_max_agents),
+            "max_total_spawns": int(st.session_state.az_max_total_spawns),
+        },
+    }
+    st.session_state.pop("az_result", None)
+    st.switch_page("pages/5_Run.py")

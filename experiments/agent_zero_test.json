@@ -1,0 +1,42 @@
+{
+  "meta": {
+    "name": "Agent 0 congestion pricing",
+    "author": "Paula"
+  },
+  "base": {
+    "mode": "agent_zero",
+    "task": {
+      "description": "Should the city introduce congestion charges on its inner ring road?"
+    },
+    "instructions": {
+      "base_instructions": "Write exactly one paragraph (50-150 words) arguing from your assigned perspective. Be specific — cite mechanisms, consequences, or evidence.",
+      "guideline_notes": ""
+    },
+    "protocol": {
+      "review_depth": "Previous Round"
+    },
+    "ecu": {
+      "enabled": true,
+      "info_condition": "opaque",
+      "include_self_assessment": false,
+      "coalition_threshold": 0.6,
+      "orchestrator_enabled": false,
+      "dimensions": [
+        { "name": "depth_breadth", "label": "Depth-Breadth", "weight": 1.0, "sw_weight": 1.0 },
+        { "name": "depth", "label": "Depth", "weight": 1.0, "sw_weight": 1.0 },
+        { "name": "clarity", "label": "Clarity", "weight": 1.0, "sw_weight": 1.0 },
+        { "name": "consensus", "label": "Consensus", "weight": 1.0, "sw_weight": 1.0 }
+      ]
+    },
+    "agent_zero": {
+      "provider": "Anthropic",
+      "model": "claude-sonnet-4-6",
+      "max_rounds": 10,
+      "max_agents": 5,
+      "max_total_spawns": 7
+    }
+  },
+  "scenarios": [
+    { "name": "agent_zero_run", "protocol": {} }
+  ]
+}

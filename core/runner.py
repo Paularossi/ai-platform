@@ -191,10 +191,35 @@ def build_item_data(row: pd.Series, column_mapping: dict) -> dict:
     }
 
 
+def _agent_zero_result_row(r: dict) -> dict:
+    """Summarise an Agent 0-mode result (different shape from manual mode) into one row."""
+    rounds = r.get("rounds", [])
+    last = rounds[-1] if rounds else {}
+    row: dict[str, Any] = {
+        "item_id": r["item_id"],
+        "num_turns": r["num_turns"],
+        "ended_reason": r.get("ended_reason"),
+        "num_rounds": len(rounds),
+        "initial_roster_size": len(r.get("initial_roster", [])),
+        "final_roster_size": len(last.get("roster", [])),
+    }
+    coalition = last.get("coalition", [])
+    row["coalition_final"] = ", ".join(coalition) if len(coalition) >= 2 else "none"
+    row["coalition_reached"] = len(coalition) >= 2
+    row["social_welfare_final"] = last.get("social_welfare")
+    for agent, bal in r.get("final_ecu_balances", {}).items():
+        row[f"ecu_{agent}"] = round(bal, 4)
+    return row
+
+
 def results_to_df(results: list[dict]) -> pd.DataFrame:
     """Flatten a list of result dicts into a wide DataFrame (one row per item)."""
     rows = []
     for r in results:
+        if r.get("mode") == "agent_zero":
+            rows.append(_agent_zero_result_row(r))
+            continue
+
         row: dict[str, Any] = {
             "item_id": r["item_id"],
             "num_turns": r["num_turns"],

@@ -21,6 +21,8 @@ Adding a new provider:
 
 from __future__ import annotations
 
+import json
+
 
 # ---------------------------------------------------------------------------
 # Supported providers and their model menus
@@ -74,6 +76,25 @@ class LLMProvider:
     ) -> str:
         raise NotImplementedError
 
+    def complete_structured(
+        self,
+        model: str,
+        system_prompt: str,
+        user_message: str,
+        schema: dict,
+        max_tokens: int = 1500,
+        temperature: float = 0.0,
+    ) -> dict:
+        """
+        Call the model in structured/JSON-schema output mode and return the
+        parsed dict. Used for control-flow decisions (e.g. Agent 0) where the
+        response must conform to a schema rather than free text.
+
+        Raises on any failure — callers must validate/degrade to a safe
+        default themselves.
+        """
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # OpenAI
@@ -102,6 +123,24 @@ class OpenAIProvider(LLMProvider):
         )
         return response.choices[0].message.content or ""
 
+    def complete_structured(self, model, system_prompt, user_message, schema,
+                             max_tokens=1500, temperature=0.0) -> dict:
+        response = self._get_client().chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "decision", "schema": schema, "strict": True},
+            },
+        )
+        content = response.choices[0].message.content or "{}"
+        return json.loads(content)
+
 
 # ---------------------------------------------------------------------------
 # Anthropic
@@ -127,6 +166,31 @@ class AnthropicProvider(LLMProvider):
             max_tokens=max_tokens,
         )
         return response.content[0].text if response.content else ""
+
+    def complete_structured(self, model, system_prompt, user_message, schema,
+                             max_tokens=1500, temperature=0.0) -> dict:
+        # Anthropic has no native JSON-schema response mode — force a single
+        # tool call whose input_schema is the desired schema. Some models
+        # (e.g. claude-opus-4-8) reject an explicit `temperature` on this
+        # call path ("temperature is deprecated for this model"), so it is
+        # deliberately omitted here — forced tool-use already yields
+        # deterministic-enough output for a control-flow decision.
+        response = self._get_client().messages.create(
+            model=model,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+            max_tokens=max_tokens,
+            tools=[{
+                "name": "submit_decision",
+                "description": "Submit the structured decision.",
+                "input_schema": schema,
+            }],
+            tool_choice={"type": "tool", "name": "submit_decision"},
+        )
+        for block in response.content:
+            if getattr(block, "type", None) == "tool_use":
+                return block.input
+        raise ValueError("Anthropic response contained no tool_use block")
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +277,23 @@ class GoogleProvider(LLMProvider):
         if reason == "STOP":
             return ""
         return f"[BLOCKED: finish_reason={reason}]"
+
+    def complete_structured(self, model, system_prompt, user_message, schema,
+                             max_tokens=1500, temperature=0.0) -> dict:
+        from google.genai import types
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            response_mime_type="application/json",
+            response_schema=schema,
+        )
+        response = self._get_client().models.generate_content(
+            model=model, contents=user_message, config=config,
+        )
+        text = response.candidates[0].content.parts[0].text
+        return json.loads(text)
 
 
 # ---------------------------------------------------------------------------

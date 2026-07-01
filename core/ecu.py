@@ -659,6 +659,14 @@ class EcuLedger:
 
         return ecu
 
+    def add_agent(self, name: str) -> None:
+        """
+        Register a new agent joining mid-run (Agent 0 mode). Seeds a zero
+        balance; the agent starts earning ECUs from its first peer review.
+        """
+        if name not in self._balances:
+            self._balances[name] = 0.0
+
     @property
     def weights(self) -> dict[str, float]:
         """Backward-compatible alias for variable ECU weights w^ECU."""

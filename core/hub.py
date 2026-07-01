@@ -128,6 +128,31 @@ class CommunicationHub:
         self.originator_name: str | None = None
         self.originator_contribution: Any = None
         self.converged: bool = False
+        self._roster_events: list[dict] = []  # {cycle, action: "add"/"remove", agent_name}
+
+    # ------------------------------------------------------------------
+    # Dynamic roster (Agent 0 mode)
+    # ------------------------------------------------------------------
+
+    def add_agent(self, name: str, cycle: int | None = None) -> None:
+        """Add an agent to the active roster starting the given cycle."""
+        if name not in self.agent_names:
+            self.agent_names.append(name)
+            self._roster_events.append({"cycle": cycle, "action": "add", "agent_name": name})
+
+    def remove_agent(self, name: str, cycle: int | None = None) -> None:
+        """
+        Remove an agent from the active roster. Past contributions and peer
+        reviews stay in the log — only future participation stops, since
+        _log/_peer_review_log are never touched here.
+        """
+        if name in self.agent_names:
+            self.agent_names.remove(name)
+            self._roster_events.append({"cycle": cycle, "action": "remove", "agent_name": name})
+
+    @property
+    def roster_events(self) -> list[dict]:
+        return list(self._roster_events)
 
     # ------------------------------------------------------------------
     # Core interface used by the protocol
@@ -327,6 +352,7 @@ class CommunicationHub:
             "log": [o.to_dict() for o in self._log],
             "peer_review_log": [p.to_dict() for p in self._peer_review_log],
             "prompt_log": self._prompt_log,
+            "roster_events": self._roster_events,
         }
         if self.ledger:
             d["ecu"] = self.ledger.to_dict()
