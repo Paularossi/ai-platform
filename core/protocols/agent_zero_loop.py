@@ -392,13 +392,13 @@ def run_agent_zero_experiment(
         ecu_earned_this_round = {rec.agent_name: round(rec.ecu_earned, 3) for rec in cycle_records}
 
         # ── Compact, human-readable per-round record ─────────────────────
+        # Contributions are stored in full here (this is the primary readable
+        # record) — the truncation used to live only in "debug", but that
+        # buried the actual argument text a reader most wants to see.
         round_summaries.append({
             "cycle": cycle,
             "roster": roster_specs,
-            "contributions_preview": {
-                name: (text[:150] + "…" if isinstance(text, str) and len(text) > 150 else text)
-                for name, text in round_contributions.items()
-            },
+            "contributions": dict(round_contributions),
             "agent_trajectory_notes": agent_notes,
             "dimension_scores": dimension_scores,
             "ecu_earned_this_round": ecu_earned_this_round,
@@ -437,7 +437,7 @@ def run_agent_zero_experiment(
         if last:
             coalition_str = ", ".join(last["coalition"]) if len(last["coalition"]) >= 2 else "none formed"
             fallback_summary = (
-                f"[Auto-generated summary — Agent 0 did not supply a final brief.] "
+                f"[Auto-generated summary. Agent 0 did not supply a final brief.] "
                 f"The debate ran for {last['cycle'] + 1} round(s) and stopped "
                 f"({ended_reason.replace('_', ' ')}). Final roster: "
                 f"{', '.join(a['name'] for a in last['roster'])}. "

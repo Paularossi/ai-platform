@@ -1,10 +1,9 @@
-"""Agent 0 mode — Setup: topic, Agent 0's own model, and hard stopping bounds.
+"""Setup page for Agent 0 mode.
 
-This is the only configuration page. Agent 0 designs everything about how the
-debate runs — the roster, the shared instructions given to agents, the
-quality dimensions and weights, the coalition threshold — and adapts, steers,
-and ends the debate autonomously. The human only supplies the topic, which
-LLM orchestrates, and the hard safety bounds that cap cost/runtime.
+Agent 0 designs the debate: the panel of agents, the instructions they get,
+the criteria they are scored on, and the visibility rules. The person using
+this page only supplies the topic, picks which model runs Agent 0, and sets
+hard limits on how large or long the debate can run.
 """
 
 from __future__ import annotations
@@ -39,37 +38,37 @@ def init_state() -> None:
 
 init_state()
 
-st.title("🧠 Agent 0 — Autonomous Deliberation")
+st.title("New Debate")
 st.caption(
-    "Give it a topic. Agent 0 designs the debating roster, the instructions agents receive, "
-    "and the quality dimensions used to score them — then adapts, steers, and ends the debate "
-    "with a final policy brief, autonomously."
+    "Enter a topic. Agent 0 assembles the panel, sets the ground rules, and runs the "
+    "debate to a policy brief."
 )
 
 st.divider()
 
 with st.container(border=True):
-    st.subheader("Deliberation topic")
+    st.subheader("Topic")
     st.session_state.az_topic = st.text_area(
-        "Topic / question",
+        "Topic",
         value=st.session_state.az_topic,
         placeholder="Should the city introduce congestion charges on its inner ring road?",
         height=100,
         label_visibility="collapsed",
+        key="widget_topic",
     )
 
 with st.container(border=True):
-    st.subheader("Agent 0's model")
+    st.subheader("Moderator")
     st.caption(
-        "Which LLM orchestrates the debate — designs the roster and evaluation criteria, "
-        "adds/removes agents, steers them, and decides when to end. (The debating agents "
-        "themselves are drawn from OpenAI/gpt-4o and Anthropic/claude-sonnet-4-6.)"
+        "Agent 0 runs the debate: it picks who takes part, decides what they are scored on, "
+        "and calls the debate when it's done. Panel members are drawn from OpenAI's and Anthropic's models. "
     )
     c1, c2, c3 = st.columns(3)
     with c1:
         st.session_state.az_provider = st.selectbox(
             "Provider", PROVIDERS,
             index=PROVIDERS.index(st.session_state.az_provider),
+            key="widget_provider",
         )
     with c2:
         model_options = PROVIDER_MODELS.get(st.session_state.az_provider, [])
@@ -77,33 +76,38 @@ with st.container(border=True):
         st.session_state.az_model = st.selectbox(
             "Model", model_options,
             index=model_options.index(current_model),
+            key="widget_model",
         )
     with c3:
         st.session_state.az_temperature = st.slider(
             "Temperature", min_value=0.0, max_value=1.0,
-            value=st.session_state.get("az_temperature", 0.0), step=0.1,
-            help="0 = deterministic. Higher values increase variety in Agent 0's own decisions. "
-                 "Ignored for some Anthropic models on this call path.",
+            value=st.session_state.get("az_temperature", 0.0), step=0.01,
+            help="0 keeps Agent 0's decisions consistent. Higher values add variety. "
+                 "A few models don't support this and will run at their own default.",
+            key="widget_temperature",
         )
 
-with st.expander("Advanced: safety bounds"):
+with st.expander("Limits"):
     st.caption(
-        "Enforced by the loop, independent of Agent 0's own judgement — these cap runtime "
-        "and cost regardless of what Agent 0 decides."
+        "These cap how long and how large the debate can grow, regardless of what "
+        "Agent 0 decides."
     )
     c1, c2, c3 = st.columns(3)
     with c1:
         st.session_state.az_max_rounds = st.number_input(
             "Max rounds", min_value=1, max_value=50, value=st.session_state.az_max_rounds, step=1,
+            key="widget_max_rounds",
         )
     with c2:
         st.session_state.az_max_agents = st.number_input(
-            "Max agents on roster", min_value=1, max_value=10, value=st.session_state.az_max_agents, step=1,
+            "Max panel size", min_value=1, max_value=10, value=st.session_state.az_max_agents, step=1,
+            key="widget_max_agents",
         )
     with c3:
         st.session_state.az_max_total_spawns = st.number_input(
-            "Max total spawns", min_value=1, max_value=20, value=st.session_state.az_max_total_spawns, step=1,
-            help="Caps the cumulative number of agents ever created, including the initial roster.",
+            "Max agents created", min_value=1, max_value=20, value=st.session_state.az_max_total_spawns, step=1,
+            help="Counts the starting panel plus every agent added later.",
+            key="widget_max_total_spawns",
         )
 
 with st.container(border=True):
@@ -113,7 +117,7 @@ with st.container(border=True):
     for provider in used_providers:
         env_var = API_KEY_ENV_VARS.get(provider, f"{provider.upper()}_API_KEY")
         if os.environ.get(env_var):
-            st.success(f"{provider} API key configured ✓", icon="🔑")
+            st.success(f"{provider} key set", icon=":material/check_circle:")
             api_keys[provider] = ""
         else:
             api_keys[provider] = st.text_input(
@@ -124,9 +128,9 @@ st.divider()
 
 topic_ready = bool(st.session_state.az_topic.strip())
 if not topic_ready:
-    st.warning("Enter a deliberation topic to continue.")
+    st.warning("Enter a topic to start.")
 
-if st.button("▶ Launch debate", type="primary", disabled=not topic_ready, use_container_width=True):
+if st.button("Start debate", type="primary", disabled=not topic_ready, use_container_width=True):
     for provider, key in api_keys.items():
         if key:
             os.environ[API_KEY_ENV_VARS.get(provider, f"{provider.upper()}_API_KEY")] = key
@@ -134,8 +138,8 @@ if st.button("▶ Launch debate", type="primary", disabled=not topic_ready, use_
     st.session_state.experiment_config = {
         "mode": "agent_zero",
         "task": {"description": st.session_state.az_topic.strip()},
-        # "instructions" and "ecu" are intentionally left for Agent 0 to
-        # design in its initialization call — see core/agent_zero.py.
+        # "instructions" and "ecu" are left unset here on purpose: Agent 0
+        # designs them in its initialization call (see core/agent_zero.py).
         "agent_zero": {
             "provider": st.session_state.az_provider,
             "model": st.session_state.az_model,
