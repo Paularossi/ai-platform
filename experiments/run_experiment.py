@@ -142,6 +142,14 @@ def run_scenario(base: dict, scenario: dict, dry_run: bool = False) -> dict:
     if cfg.get("mode") == "agent_zero":
         max_rounds = cfg.get("agent_zero", {}).get("max_rounds", 10)
 
+        def _print_design(design: dict) -> None:
+            print(f"\n  Agent 0's design:", flush=True)
+            print(f"    Roster: {', '.join(a['name'] for a in design['agents'])}", flush=True)
+            print(f"    φ1={design['visibility_mode']}  φ2={design['review_depth']}  "
+                  f"ECU info={design['info_condition']}  τ={design['coalition_threshold']}", flush=True)
+            dim_names = ", ".join(d["label"] for d in design["ecu_dimensions"])
+            print(f"    Dimensions: {dim_names}", flush=True)
+
         def _progress(round_summary: dict) -> None:
             cycle = round_summary["cycle"]
             roster = [a["name"] for a in round_summary["roster"]]
@@ -160,7 +168,9 @@ def run_scenario(base: dict, scenario: dict, dry_run: bool = False) -> dict:
             if round_summary["end_debate"]:
                 print("    Agent 0: ending debate.", flush=True)
 
-        result = run_agent_zero_experiment(cfg, dry_run=dry_run, on_round=_progress)
+        result = run_agent_zero_experiment(
+            cfg, dry_run=dry_run, on_init=_print_design, on_round=_progress,
+        )
         result["scenario"] = scenario["name"]
         result["protocol_config"] = cfg.get("protocol", {})
         return result

@@ -45,6 +45,44 @@ with st.container(border=True):
 
 # ---------- results renderer ----------
 
+def _render_design(design: dict) -> None:
+    """Show what Agent 0 set up, before the debate itself starts."""
+    with st.expander("🧭 Agent 0's design", expanded=True):
+        agents = design.get("agents", [])
+        st.markdown(f"**Roster ({len(agents)}):**")
+        for a in agents:
+            st.markdown(f"- **{a['name']}** ({a['provider']}/{a['model']}): {a['role']}")
+
+        st.markdown("**Base instructions:**")
+        st.caption(design.get("base_instructions", ""))
+        if design.get("guideline_notes"):
+            st.markdown("**Guideline notes:**")
+            st.caption(design["guideline_notes"])
+
+        st.markdown("**Quality dimensions:**")
+        dims = design.get("ecu_dimensions", [])
+        if dims:
+            st.dataframe(
+                pd.DataFrame([
+                    {"Dimension": d["label"], "Rubric": d["rubric"],
+                     "ECU weight": d["weight"], "SW weight": d["sw_weight"]}
+                    for d in dims
+                ]),
+                hide_index=True, use_container_width=True,
+                column_config={"Rubric": st.column_config.TextColumn(width="large")},
+            )
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("φ1 visibility", design.get("visibility_mode", "—"))
+        c2.metric("φ2 review depth", design.get("review_depth", "—"))
+        c3.metric("ECU info condition", design.get("info_condition", "—"))
+        st.caption(f"Coalition threshold τ = {design.get('coalition_threshold', '—')}")
+
+        if design.get("reasoning"):
+            st.markdown("**Agent 0's reasoning for this setup:**")
+            st.caption(design["reasoning"])
+
+
 def _render_round(round_summary: dict, container) -> None:
     cycle = round_summary["cycle"]
     roster = [a["name"] for a in round_summary["roster"]]
@@ -155,13 +193,25 @@ if "az_result" not in st.session_state:
     if not launch:
         st.stop()
 
+    design_container = st.container()
     rounds_container = st.container()
-    with st.spinner("Agent 0 is designing the starting roster…"):
+
+    def _on_init(design: dict) -> None:
+        with design_container:
+            _render_design(design)
+
+    with st.spinner("Agent 0 is designing the debate…"):
         result = run_agent_zero_experiment(
             cfg, dry_run=False,
+            on_init=_on_init,
             on_round=lambda rs: _render_round(rs, rounds_container),
         )
     st.session_state.az_result = result
+else:
+    # Cached result (e.g. after a download-button rerun) — design wasn't just rendered live, so show it here instead.
+    result = st.session_state.az_result
+    if result.get("agent_zero_design"):
+        _render_design(result["agent_zero_design"])
 
 _show_result(st.session_state.az_result)
 _show_nav_buttons()

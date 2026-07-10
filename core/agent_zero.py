@@ -6,7 +6,11 @@ Agent 0 — the autonomous orchestrator for "Agent 0 mode".
 Unlike manual mode (fixed roster, human-configured protocol), Agent 0 mode
 only requires a human-provided deliberation topic. A single super-agent:
 
-  1. Reads the topic and proposes the starting roster (one-time call).
+  1. Reads the topic and, in one initialization call, decides the starting
+     roster, the shared base instructions given to every debating agent, the
+     quality dimensions used to score contributions (with rubrics and ECU/SW
+     weights), and the coalition threshold. The human may override any of
+     these in config; anything left unset is Agent 0's call, not a default.
   2. After every debate round (post peer-review, post ECU/SW computation),
      is called once with the round's state and returns a structured decision:
      agents to add, agents to remove, whether to end the debate, and — if
@@ -38,16 +42,42 @@ platform. A human has provided only a topic; you are responsible for everything 
 choosing which agents deliberate, adjusting the roster as the debate evolves, deciding \
 when to give an agent a new instruction, and deciding when the debate has run its course.
 
-Your available actions, each round:
-1. INITIAL ROSTER (one-time, before round 1) — propose the set of agents that will \
-deliberate on the topic. Give each a name, a role description (their mandate or \
-perspective, not a personality), and an LLM provider + model.
-2. ADD AGENTS — introduce a new agent to the roster starting the next round.
-3. REMOVE AGENTS — drop an agent from the roster; they stop contributing and being \
+Your available actions:
+
+INITIALIZATION (one-time, before round 1) — decide:
+1. ROSTER — the set of agents that will deliberate on the topic. Give each a name, a \
+role description (their mandate or perspective, not a personality), and an LLM provider + model.
+2. BASE INSTRUCTIONS — the shared instructions every debating agent receives alongside \
+their individual role (e.g. what form a contribution should take). Independent of any \
+agent's specific role or perspective.
+3. GUIDELINE NOTES (optional) — shared definitions or factual context relevant to the \
+topic, if you judge any would help agents reason about it consistently. Leave empty if none apply.
+4. QUALITY DIMENSIONS — the dimensions used to score every contribution during peer \
+review. For each: a name, a label, a scoring rubric (0-1), an ECU weight (agent payout) \
+and an SW weight (social welfare valuation). Decide however many dimensions and whatever \
+weights you judge appropriate for evaluating contributions on this topic. Exactly one \
+dimension must be named "consensus" — its score is used mechanically to detect coalition \
+formation between agents; its rubric, weight, and meaning are otherwise yours to define.
+5. COALITION THRESHOLD — the minimum mutual consensus score two agents need for them to \
+be counted as a coalition.
+6. VISIBILITY (φ1) — what each agent sees of others' contributions before writing their \
+own: "Blind" (nothing), "Previous round" (everyone's most recent contribution), or \
+"Full history" (every contribution from every round).
+7. REVIEW DEPTH (φ2) — how much contribution history a reviewer sees of the agent they \
+are scoring during peer review: "Current Only", "Previous Round" (current + one back), \
+or "Full History" (the full trajectory).
+8. ECU INFORMATION CONDITION — what agents know about the incentive mechanism itself: \
+"transparent" (full dimension weights + all agents' ECU balances), "semi-transparent" \
+(noisy weight estimates + only their own balance), or "opaque" (no ECU/weight information \
+at all).
+
+EVERY ROUND (after the round's contributions and peer review complete):
+9. ADD AGENTS — introduce a new agent to the roster starting the next round.
+10. REMOVE AGENTS — drop an agent from the roster; they stop contributing and being \
 scored from the next round, but their prior contributions remain part of the record.
-4. STEER AGENTS — give any agent a short, specific instruction that is added to their \
+11. STEER AGENTS — give any agent a short, specific instruction that is added to their \
 prompt from the next round onward.
-5. END THE DEBATE — stop the debate and write a final policy brief that represents \
+12. END THE DEBATE — stop the debate and write a final policy brief that represents \
 what the deliberation actually produced — the consensus reached, or the substantive \
 disagreement, if no consensus formed.
 
@@ -108,13 +138,39 @@ _AGENT_SPEC_SCHEMA = {
     "additionalProperties": False,
 }
 
+_ECU_DIMENSION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "label": {"type": "string"},
+        "rubric": {"type": "string"},
+        "weight": {"type": "number"},
+        "sw_weight": {"type": "number"},
+    },
+    "required": ["name", "label", "rubric", "weight", "sw_weight"],
+    "additionalProperties": False,
+}
+
+VISIBILITY_OPTIONS = ["Blind", "Previous round", "Full history"]
+REVIEW_DEPTH_OPTIONS = ["Current Only", "Previous Round", "Full History"]
+INFO_CONDITION_OPTIONS = ["transparent", "semi-transparent", "opaque"]
+
 INIT_SCHEMA = {
     "type": "object",
     "properties": {
         "reasoning": {"type": "string"},
         "agents": {"type": "array", "items": _AGENT_SPEC_SCHEMA},
+        "base_instructions": {"type": "string"},
+        "guideline_notes": {"type": "string"},
+        "ecu_dimensions": {"type": "array", "items": _ECU_DIMENSION_SCHEMA},
+        "coalition_threshold": {"type": "number"},
+        "visibility_mode": {"type": "string", "enum": VISIBILITY_OPTIONS},
+        "review_depth": {"type": "string", "enum": REVIEW_DEPTH_OPTIONS},
+        "info_condition": {"type": "string", "enum": INFO_CONDITION_OPTIONS},
     },
-    "required": ["reasoning", "agents"],
+    "required": ["reasoning", "agents", "base_instructions", "guideline_notes",
+                 "ecu_dimensions", "coalition_threshold",
+                 "visibility_mode", "review_depth", "info_condition"],
     "additionalProperties": False,
 }
 
@@ -167,6 +223,72 @@ def _default_roster() -> list[dict]:
         {"name": "Mediator", "role": "Seek common ground and synthesise competing views.",
          "provider": DEFAULT_PROVIDER, "model": DEFAULT_MODEL},
     ]
+
+
+# Used only if Agent 0's own initialization call fails outright (exception,
+# non-JSON response, etc.) — never shown to Agent 0 as a suggestion, since
+# that would bias its choice toward this specific content.
+_FALLBACK_BASE_INSTRUCTIONS = (
+    "Write a position statement responding to the topic from your assigned perspective. "
+    "Be specific and substantive."
+)
+
+
+def _default_ecu_dimensions() -> list[dict]:
+    """Fallback dimensions — includes the mechanically-required 'consensus' dimension."""
+    return [
+        {"name": "depth", "label": "Depth", "weight": 1.0, "sw_weight": 1.0,
+         "rubric": "Is the reasoning substantive and well-evidenced? "
+                    "0 = superficial assertion; 1 = rigorous argument with supporting logic or evidence."},
+        {"name": "clarity", "label": "Clarity", "weight": 1.0, "sw_weight": 1.0,
+         "rubric": "Is the contribution clearly written and easy to understand? "
+                    "0 = ambiguous or poorly structured; 1 = precise and well-structured."},
+        {"name": "consensus", "label": "Consensus", "weight": 1.0, "sw_weight": 1.0,
+         "rubric": "Does the contribution constructively advance group agreement or "
+                    "productively engage with opposing views? "
+                    "0 = purely divisive; 1 = constructively bridges perspectives."},
+    ]
+
+
+def _validate_ecu_dimensions(raw: Any) -> list[dict]:
+    """
+    Validate Agent 0's proposed dimensions. Ensures exactly one dimension is
+    named "consensus" (mechanically required — CoalitionTracker reads this
+    dimension specifically) without otherwise constraining what Agent 0
+    chooses to measure or how it weights it.
+    """
+    dims: list[dict] = []
+    seen: set[str] = set()
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip().lower().replace(" ", "_")
+            label = str(item.get("label", "")).strip()
+            rubric = str(item.get("rubric", "")).strip()
+            if not name or not label or not rubric or name in seen:
+                continue
+            try:
+                weight = float(item.get("weight", 1.0))
+                sw_weight = float(item.get("sw_weight", 1.0))
+            except (TypeError, ValueError):
+                weight, sw_weight = 1.0, 1.0
+            dims.append({"name": name, "label": label, "rubric": rubric,
+                         "weight": max(0.0, weight), "sw_weight": max(0.0, sw_weight)})
+            seen.add(name)
+
+    if "consensus" not in seen:
+        dims.append(_default_ecu_dimensions()[-1])  # the consensus entry
+
+    return dims or _default_ecu_dimensions()
+
+
+def _validate_coalition_threshold(raw: Any) -> float:
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.6
+    return min(1.0, max(0.0, v))
 
 
 def _noop_decision(reason: str = "validation failed") -> dict:
@@ -305,22 +427,55 @@ class AgentZero:
         model: str = "claude-opus-4-8",
         max_agents: int = 6,
         dry_run: bool = False,
+        temperature: float = 0.0,
     ):
         self.provider = provider
         self.model = model
         self.max_agents = max_agents
         self.dry_run = dry_run
+        # Applies to whichever provider is set. Anthropic auto-retries without
+        # temperature if a given model rejects it on this call path — see
+        # AnthropicProvider.complete_structured() in providers.py.
+        self.temperature = temperature
 
     # ------------------------------------------------------------------
-    def initialize(self, topic: str) -> list[dict]:
-        """One-time call: propose the starting roster from the topic alone."""
+    def initialize(self, topic: str) -> dict:
+        """
+        One-time call: from the topic alone, decide the starting roster, the
+        shared base instructions, optional guideline notes, the quality
+        dimensions (with rubrics and ECU/SW weights), the coalition
+        threshold, and the φ1/φ2/ECU-info-condition visibility settings.
+
+        Returns
+        -------
+        dict with keys "reasoning", "agents", "base_instructions",
+        "guideline_notes", "ecu_dimensions", "coalition_threshold",
+        "visibility_mode", "review_depth", "info_condition" — each
+        independently validated/defaulted, so a partially-malformed
+        response still yields a usable result rather than failing the
+        whole call.
+        """
+        fallback = {
+            "reasoning": "",
+            "agents": _default_roster(),
+            "base_instructions": _FALLBACK_BASE_INSTRUCTIONS,
+            "guideline_notes": "",
+            "ecu_dimensions": _default_ecu_dimensions(),
+            "coalition_threshold": 0.6,
+            "visibility_mode": "Previous round",
+            "review_depth": "Previous Round",
+            "info_condition": "opaque",
+        }
         if self.dry_run:
-            return _default_roster()
+            return fallback
 
         prompt = (
             f"Deliberation topic: {topic}\n\n"
-            f"Propose the starting roster (at most {self.max_agents} agents). "
-            "Return your reasoning and the agent list."
+            f"This is the initialization call — decide the starting roster (at most "
+            f"{self.max_agents} agents), the shared base instructions, optional guideline "
+            "notes, the quality dimensions (with rubrics and weights), the coalition "
+            "threshold, and the visibility/review-depth/ECU-information-condition settings, "
+            "as described in your instructions."
         )
         try:
             result = get_provider(self.provider).complete_structured(
@@ -328,14 +483,37 @@ class AgentZero:
                 system_prompt=AGENT_ZERO_SYSTEM_PROMPT,
                 user_message=prompt,
                 schema=INIT_SCHEMA,
-                max_tokens=1200,
+                max_tokens=2500,
+                temperature=self.temperature,
             )
-            roster = _validate_roster(result.get("agents"), self.max_agents)
         except Exception as exc:
-            print(f"[AgentZero] initialize() failed: {exc} — falling back to default roster")
-            roster = []
+            print(f"[AgentZero] initialize() failed: {exc} — falling back to defaults")
+            return fallback
 
-        return roster or _default_roster()
+        roster = _validate_roster(result.get("agents"), self.max_agents) or fallback["agents"]
+        base_instructions = str(result.get("base_instructions", "") or "").strip() \
+            or fallback["base_instructions"]
+        guideline_notes = str(result.get("guideline_notes", "") or "").strip()
+        ecu_dimensions = _validate_ecu_dimensions(result.get("ecu_dimensions"))
+        coalition_threshold = _validate_coalition_threshold(result.get("coalition_threshold"))
+        visibility_mode = result.get("visibility_mode") if result.get("visibility_mode") in VISIBILITY_OPTIONS \
+            else fallback["visibility_mode"]
+        review_depth = result.get("review_depth") if result.get("review_depth") in REVIEW_DEPTH_OPTIONS \
+            else fallback["review_depth"]
+        info_condition = result.get("info_condition") if result.get("info_condition") in INFO_CONDITION_OPTIONS \
+            else fallback["info_condition"]
+
+        return {
+            "reasoning": str(result.get("reasoning", "") or ""),
+            "agents": roster,
+            "base_instructions": base_instructions,
+            "guideline_notes": guideline_notes,
+            "ecu_dimensions": ecu_dimensions,
+            "coalition_threshold": coalition_threshold,
+            "visibility_mode": visibility_mode,
+            "review_depth": review_depth,
+            "info_condition": info_condition,
+        }
 
     # ------------------------------------------------------------------
     def build_context(
@@ -441,6 +619,7 @@ class AgentZero:
                 # Running out mid-response silently drops the brief, which
                 # forces end_debate back to False regardless of intent.
                 max_tokens=4096,
+                temperature=self.temperature,
             )
             validated = _validate_decision(result, current_roster, self.max_agents)
             # Keep the pre-validation response for debugging drift between
@@ -481,6 +660,7 @@ class AgentZero:
                 ),
                 schema=BRIEF_SCHEMA,
                 max_tokens=2000,
+                temperature=self.temperature,
             )
             brief = str(result.get("final_brief", "") or "").strip()
             return brief or fallback_summary

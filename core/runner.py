@@ -43,6 +43,27 @@ def build_agents(cfg: dict) -> list[Agent]:
 # ECU / peer review construction
 # ---------------------------------------------------------------------------
 
+def _resolve_dimensions(dim_configs: list[dict]) -> list[dict]:
+    """
+    Each dimension config supplies its own rubric when present (e.g. Agent 0
+    mode, where dimensions are authored fresh per experiment — including
+    dimension names that don't exist in DEFAULT_DIMENSIONS). If a config
+    omits "rubric" (the manual-mode UI only ever stores name/label/weight/
+    sw_weight, since its dimension picker is drawn from DEFAULT_DIMENSIONS),
+    fall back to the matching DEFAULT_DIMENSIONS entry by name.
+    """
+    defaults_by_name = {d["name"]: d for d in DEFAULT_DIMENSIONS}
+    resolved: list[dict] = []
+    for dd in dim_configs:
+        if dd.get("rubric"):
+            resolved.append(dd)
+        elif dd["name"] in defaults_by_name:
+            resolved.append({**defaults_by_name[dd["name"]], **dd})
+        # else: a named dimension with no rubric and no known default — skip,
+        # nothing to show the reviewer for it.
+    return resolved
+
+
 def build_peer_reviewer(cfg: dict, review_depth: str) -> PeerReviewRound | None:
     """
     Build the shared PeerReviewRound instance (one per experiment, reused across items).
@@ -53,7 +74,7 @@ def build_peer_reviewer(cfg: dict, review_depth: str) -> PeerReviewRound | None:
         return None
 
     dim_configs = ecu_cfg.get("dimensions") or DEFAULT_DIMENSIONS
-    active_dims = [d for d in DEFAULT_DIMENSIONS if d["name"] in {dd["name"] for dd in dim_configs}]
+    active_dims = _resolve_dimensions(dim_configs)
     return PeerReviewRound(
         dimensions=active_dims,
         include_self_assessment=ecu_cfg.get("include_self_assessment", False),
@@ -78,7 +99,7 @@ def build_ecu_components(
     dim_configs = ecu_cfg.get("dimensions") or DEFAULT_DIMENSIONS
     ecu_weights = {d["name"]: float(d.get("weight", 1.0)) for d in dim_configs}
     sw_weights = {d["name"]: float(d.get("sw_weight", 1.0)) for d in dim_configs}
-    active_dims = [d for d in DEFAULT_DIMENSIONS if d["name"] in ecu_weights]
+    active_dims = _resolve_dimensions(dim_configs)
 
     ledger = EcuLedger(
         agent_names=agent_names,

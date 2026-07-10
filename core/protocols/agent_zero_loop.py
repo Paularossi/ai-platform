@@ -169,6 +169,7 @@ def run_agent_zero_experiment(
     cfg: dict,
     dry_run: bool = False,
     on_round: Any = None,
+    on_init: Any = None,
 ) -> dict:
     """
     Run one full Agent 0-mode experiment on a single topic.
@@ -186,13 +187,19 @@ def run_agent_zero_experiment(
         the same compact record that gets appended to "rounds" in the return
         value — used by callers (CLI, UI) that want progress output without
         re-implementing the loop or reaching into hub/ledger/coalition directly.
+    on_init : callable | None
+        Optional callback(design_summary: dict) invoked once, right after the
+        initialization call and config merge, before the round loop starts —
+        lets a caller show "what Agent 0 set up" (roster, instructions,
+        dimensions, coalition threshold, φ1/φ2/info-condition) up front.
 
     Returns
     -------
-    dict with "mode", "rounds" (the primary per-round record), "final_brief",
-    "ended_reason", "agent_zero_config", and a "debug" section holding the
-    raw contribution/peer-review objects, full coalition history, ECU ledger,
-    and every LLM prompt+response (including Agent 0's own calls).
+    dict with "mode", "agent_zero_design" (Agent 0's initialization decision),
+    "rounds" (the primary per-round record), "final_brief", "ended_reason",
+    "agent_zero_config", and a "debug" section holding the raw contribution/
+    peer-review objects, full coalition history, ECU ledger, and every LLM
+    prompt+response (including Agent 0's own calls).
     """
     from core.runner import build_ecu_components, build_hub, build_peer_reviewer
 
@@ -202,12 +209,13 @@ def run_agent_zero_experiment(
     max_total_spawns = int(az_cfg.get("max_total_spawns", 8))
     az_provider = az_cfg.get("provider", "Anthropic")
     az_model = az_cfg.get("model", "claude-sonnet-4-6")
+    az_temperature = float(az_cfg.get("temperature", 0.0))
 
     topic = cfg.get("task", {}).get("description", "")
-    review_depth = cfg.get("protocol", {}).get("review_depth", "Previous Round")
 
     agent_zero = AgentZero(
         provider=az_provider, model=az_model, max_agents=max_agents, dry_run=dry_run,
+        temperature=az_temperature,
     )
 
     # Shared, mutable dict — every Agent below is constructed with this same
@@ -217,8 +225,37 @@ def run_agent_zero_experiment(
     cfg.setdefault("agent_prompt_overrides", {})
 
     # ── One-time initialization call ──────────────────────────────────────
-    initial_roster = agent_zero.initialize(topic)
-    initial_roster = initial_roster[:max_agents]
+    # Agent 0 designs everything about how the debate runs except the hard
+    # bounds above: roster, shared instructions, quality dimensions/weights,
+    # coalition threshold, and φ1/φ2/ECU-info-condition visibility. A
+    # human-provided value in cfg (e.g. from a hand-authored batch config)
+    # is respected as an override; anything left unset is Agent 0's call,
+    # not a hardcoded default.
+    init_result = agent_zero.initialize(topic)
+    initial_roster = init_result["agents"][:max_agents]
+
+    instructions_cfg = cfg.setdefault("instructions", {})
+    if not instructions_cfg.get("base_instructions", "").strip():
+        instructions_cfg["base_instructions"] = init_result["base_instructions"]
+    if not instructions_cfg.get("guideline_notes", "").strip():
+        instructions_cfg["guideline_notes"] = init_result["guideline_notes"]
+
+    ecu_cfg = cfg.setdefault("ecu", {})
+    ecu_cfg["enabled"] = True  # foundational to this mode — not a human-configurable toggle
+    ecu_cfg.setdefault("include_self_assessment", False)
+    if not ecu_cfg.get("dimensions"):
+        ecu_cfg["dimensions"] = init_result["ecu_dimensions"]
+    if "coalition_threshold" not in ecu_cfg:
+        ecu_cfg["coalition_threshold"] = init_result["coalition_threshold"]
+    if "info_condition" not in ecu_cfg:
+        ecu_cfg["info_condition"] = init_result["info_condition"]
+
+    protocol_cfg = cfg.setdefault("protocol", {})
+    if "visibility_mode" not in protocol_cfg:
+        protocol_cfg["visibility_mode"] = init_result["visibility_mode"]
+    if "review_depth" not in protocol_cfg:
+        protocol_cfg["review_depth"] = init_result["review_depth"]
+    review_depth = protocol_cfg["review_depth"]
 
     agents_by_name: dict[str, Agent] = {
         spec["name"]: Agent(spec, cfg) for spec in initial_roster
@@ -234,6 +271,27 @@ def run_agent_zero_experiment(
     hub = build_hub("item_0", {"topic": topic}, cfg, agent_names, ledger)
 
     initial_roster_names = list(agent_names)
+
+    # ── Design summary — Agent 0's full initialization decision, exposed to
+    # the caller (UI/CLI) before the round loop starts, and included in the
+    # final result for post-hoc inspection. ──────────────────────────────
+    design_summary = {
+        "reasoning": init_result["reasoning"],
+        "agents": [
+            {"name": n, "role": agents_by_name[n].role,
+             "provider": agents_by_name[n].provider, "model": agents_by_name[n].model}
+            for n in initial_roster_names
+        ],
+        "base_instructions": instructions_cfg["base_instructions"],
+        "guideline_notes": instructions_cfg["guideline_notes"],
+        "ecu_dimensions": ecu_cfg["dimensions"],
+        "coalition_threshold": ecu_cfg["coalition_threshold"],
+        "visibility_mode": protocol_cfg["visibility_mode"],
+        "review_depth": protocol_cfg["review_depth"],
+        "info_condition": ecu_cfg["info_condition"],
+    }
+    if on_init:
+        on_init(design_summary)
     own_history: list[dict] = []  # Agent 0's own {"cycle", "reasoning"} log
     round_summaries: list[dict] = []  # compact, human-readable per-round record
     final_brief: str | None = None
@@ -403,11 +461,12 @@ def run_agent_zero_experiment(
         "ended_reason": ended_reason,
         "final_brief": final_brief,
         "agent_zero_config": {
-            "provider": az_provider, "model": az_model,
+            "provider": az_provider, "model": az_model, "temperature": az_temperature,
             "max_rounds": max_rounds, "max_agents": max_agents,
             "max_total_spawns": max_total_spawns,
         },
         "initial_roster": initial_roster_names,
+        "agent_zero_design": design_summary,
         "rounds": round_summaries,
         "final_ecu_balances": hub.ecu_balances,
         "final_ecu_weights": ledger.ecu_weights if ledger else {},

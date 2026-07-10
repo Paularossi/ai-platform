@@ -170,12 +170,8 @@ class AnthropicProvider(LLMProvider):
     def complete_structured(self, model, system_prompt, user_message, schema,
                              max_tokens=1500, temperature=0.0) -> dict:
         # Anthropic has no native JSON-schema response mode — force a single
-        # tool call whose input_schema is the desired schema. Some models
-        # (e.g. claude-opus-4-8) reject an explicit `temperature` on this
-        # call path ("temperature is deprecated for this model"), so it is
-        # deliberately omitted here — forced tool-use already yields
-        # deterministic-enough output for a control-flow decision.
-        response = self._get_client().messages.create(
+        # tool call whose input_schema is the desired schema.
+        kwargs = dict(
             model=model,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
@@ -187,6 +183,19 @@ class AnthropicProvider(LLMProvider):
             }],
             tool_choice={"type": "tool", "name": "submit_decision"},
         )
+        try:
+            response = self._get_client().messages.create(temperature=temperature, **kwargs)
+        except Exception as exc:
+            # Some Anthropic models reject an explicit `temperature` on this
+            # specific call path ("temperature is deprecated for this
+            # model") — retry without it rather than dropping temperature
+            # control for every Anthropic model regardless of whether it
+            # actually has this restriction.
+            if "temperature" in str(exc).lower() and "deprecated" in str(exc).lower():
+                response = self._get_client().messages.create(**kwargs)
+            else:
+                raise
+
         for block in response.content:
             if getattr(block, "type", None) == "tool_use":
                 return block.input

@@ -1,8 +1,10 @@
-"""Agent 0 mode — Setup: topic, Agent 0's own model, and advanced settings.
+"""Agent 0 mode — Setup: topic, Agent 0's own model, and hard stopping bounds.
 
-This is the only configuration page. Agent 0 designs the roster, adapts it,
-steers agents, and ends the debate autonomously — there is no manual agent
-setup, protocol picker, or review step.
+This is the only configuration page. Agent 0 designs everything about how the
+debate runs — the roster, the shared instructions given to agents, the
+quality dimensions and weights, the coalition threshold — and adapts, steers,
+and ends the debate autonomously. The human only supplies the topic, which
+LLM orchestrates, and the hard safety bounds that cap cost/runtime.
 """
 
 from __future__ import annotations
@@ -17,13 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.ecu import DEFAULT_DIMENSIONS
 from core.providers import API_KEY_ENV_VARS, PROVIDER_MODELS, PROVIDERS
-
-DEFAULT_BASE_INSTRUCTIONS = (
-    "Write exactly one paragraph (50-150 words) arguing from your assigned perspective. "
-    "Be specific — cite mechanisms, consequences, or evidence. Do not summarise other agents' views."
-)
 
 
 def init_state() -> None:
@@ -31,12 +27,10 @@ def init_state() -> None:
         "az_topic": "",
         "az_provider": "Anthropic",
         "az_model": "claude-sonnet-4-6",
-        "az_base_instructions": DEFAULT_BASE_INSTRUCTIONS,
-        "az_guideline_notes": "",
+        "az_temperature": 0.0,
         "az_max_rounds": 10,
         "az_max_agents": 6,
         "az_max_total_spawns": 8,
-        "az_coalition_threshold": 0.6,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -47,8 +41,9 @@ init_state()
 
 st.title("🧠 Agent 0 — Autonomous Deliberation")
 st.caption(
-    "Give it a topic. Agent 0 designs the debating roster, adapts it round by round, "
-    "steers agents as needed, and ends the debate with a final policy brief — autonomously."
+    "Give it a topic. Agent 0 designs the debating roster, the instructions agents receive, "
+    "and the quality dimensions used to score them — then adapts, steers, and ends the debate "
+    "with a final policy brief, autonomously."
 )
 
 st.divider()
@@ -66,11 +61,11 @@ with st.container(border=True):
 with st.container(border=True):
     st.subheader("Agent 0's model")
     st.caption(
-        "Which LLM orchestrates the debate — proposes the roster, adds/removes agents, "
-        "steers them, and decides when to end. (The debating agents themselves are drawn "
-        "from OpenAI/gpt-4o and Anthropic/claude-sonnet-4-6.)"
+        "Which LLM orchestrates the debate — designs the roster and evaluation criteria, "
+        "adds/removes agents, steers them, and decides when to end. (The debating agents "
+        "themselves are drawn from OpenAI/gpt-4o and Anthropic/claude-sonnet-4-6.)"
     )
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.session_state.az_provider = st.selectbox(
             "Provider", PROVIDERS,
@@ -83,22 +78,19 @@ with st.container(border=True):
             "Model", model_options,
             index=model_options.index(current_model),
         )
+    with c3:
+        st.session_state.az_temperature = st.slider(
+            "Temperature", min_value=0.0, max_value=1.0,
+            value=st.session_state.get("az_temperature", 0.0), step=0.1,
+            help="0 = deterministic. Higher values increase variety in Agent 0's own decisions. "
+                 "Ignored for some Anthropic models on this call path.",
+        )
 
-with st.expander("Advanced settings"):
-    st.markdown("**Instructions given to every debating agent**")
-    st.session_state.az_base_instructions = st.text_area(
-        "Base instructions",
-        value=st.session_state.az_base_instructions,
-        height=100,
+with st.expander("Advanced: safety bounds"):
+    st.caption(
+        "Enforced by the loop, independent of Agent 0's own judgement — these cap runtime "
+        "and cost regardless of what Agent 0 decides."
     )
-    st.session_state.az_guideline_notes = st.text_area(
-        "Guideline / definition notes (optional)",
-        value=st.session_state.az_guideline_notes,
-        height=70,
-        placeholder="Add definitions, scoring criteria, or factual context here.",
-    )
-
-    st.markdown("**Safety bounds** — enforced by the loop, independent of Agent 0's own judgement")
     c1, c2, c3 = st.columns(3)
     with c1:
         st.session_state.az_max_rounds = st.number_input(
@@ -113,13 +105,6 @@ with st.expander("Advanced settings"):
             "Max total spawns", min_value=1, max_value=20, value=st.session_state.az_max_total_spawns, step=1,
             help="Caps the cumulative number of agents ever created, including the initial roster.",
         )
-
-    st.markdown("**Coalition**")
-    st.session_state.az_coalition_threshold = st.slider(
-        "Coalition threshold τ", min_value=0.0, max_value=1.0,
-        value=st.session_state.az_coalition_threshold, step=0.05,
-        help="Minimum mutual consensus score for two agents to be counted as a coalition.",
-    )
 
 with st.container(border=True):
     st.subheader("API keys")
@@ -149,24 +134,12 @@ if st.button("▶ Launch debate", type="primary", disabled=not topic_ready, use_
     st.session_state.experiment_config = {
         "mode": "agent_zero",
         "task": {"description": st.session_state.az_topic.strip()},
-        "instructions": {
-            "base_instructions": st.session_state.az_base_instructions,
-            "guideline_notes": st.session_state.az_guideline_notes,
-        },
-        "ecu": {
-            "enabled": True,
-            "info_condition": "opaque",
-            "include_self_assessment": False,
-            "coalition_threshold": st.session_state.az_coalition_threshold,
-            "orchestrator_enabled": False,
-            "dimensions": [
-                {"name": d["name"], "label": d["label"], "weight": 1.0, "sw_weight": 1.0}
-                for d in DEFAULT_DIMENSIONS
-            ],
-        },
+        # "instructions" and "ecu" are intentionally left for Agent 0 to
+        # design in its initialization call — see core/agent_zero.py.
         "agent_zero": {
             "provider": st.session_state.az_provider,
             "model": st.session_state.az_model,
+            "temperature": float(st.session_state.get("az_temperature", 0.0)),
             "max_rounds": int(st.session_state.az_max_rounds),
             "max_agents": int(st.session_state.az_max_agents),
             "max_total_spawns": int(st.session_state.az_max_total_spawns),
