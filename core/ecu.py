@@ -582,6 +582,7 @@ class EcuLedger:
         self._balances: dict[str, float] = {name: 0.0 for name in agent_names}
         self._history: list[TurnRecord] = []
         self._social_welfare_history: list[dict[str, Any]] = []
+        self._noisy_weight_cache: dict[int, dict[str, float]] = {}
 
     def record_from_reviews(
         self,
@@ -666,6 +667,29 @@ class EcuLedger:
         """
         if name not in self._balances:
             self._balances[name] = 0.0
+
+    def noisy_weights_for_cycle(self, cycle: int) -> dict[str, float]:
+        """
+        Return this cycle's noisy (+/-20%) estimate of the ECU weights, under
+        the semi-transparent condition, generating it once and caching it.
+
+        Weights only change between cycles (at the Orchestrator's update, which
+        happens after peer review), so both the Phase 1 contribution prompt
+        for cycle N and the Phase 2 peer-review prompt for cycle N reference
+        the identical true weight vector. Without caching, each call site
+        (build_context, build_ecu_info_str) independently re-rolled its own
+        random noise, so the same agent could see contradictory numbers for
+        the same true weight within one round. Caching by cycle fixes that -
+        every prompt in a given cycle sees the same estimate, and a fresh
+        estimate is drawn each new cycle (correctly reflecting that the true
+        weight itself may have moved).
+        """
+        if cycle not in self._noisy_weight_cache:
+            import random
+            self._noisy_weight_cache[cycle] = {
+                k: round(v * random.uniform(0.8, 1.2), 2) for k, v in self.ecu_weights.items()
+            }
+        return self._noisy_weight_cache[cycle]
 
     @property
     def weights(self) -> dict[str, float]:

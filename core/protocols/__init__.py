@@ -10,10 +10,10 @@ when a new protocol is added.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from core.hub import ContextPacket
-from core.state import AgentOutput
+from core.state import AgentOutput, PeerReviewOutput
 
 
 def build_ecu_info_str(hub, cycle: int, agent_name: str) -> str:
@@ -33,13 +33,74 @@ def build_ecu_info_str(hub, cycle: int, agent_name: str) -> str:
         return f"ECU balances: {b_str}. Dimension weights: {w_str}."
 
     if hub.ecu_info_condition == "semi-transparent":
-        import random
-        noisy = {k: round(v * random.uniform(0.8, 1.2), 2) for k, v in weights.items()}
+        # Cached per cycle on the ledger so this matches whatever the Phase 1
+        # contribution prompt showed for the same cycle - see
+        # EcuLedger.noisy_weights_for_cycle().
+        noisy = hub.ledger.noisy_weights_for_cycle(cycle)
         w_str = ", ".join(f"{k}≈{v}" for k, v in noisy.items())
         own = balances.get(agent_name, 0.0)
         return f"Your ECU balance: {own:.3f}. Approximate dimension weights: {w_str}."
 
     return ""
+
+
+def run_peer_review_for_agent(
+    agent: Any,
+    hub: Any,
+    cycle: int,
+    peer_reviewer: Any,
+    all_contributions: dict[str, Any],
+    item_context: str,
+    agent_histories: dict[str, list[str]],
+    collect_importance_votes: bool,
+    dry_run: bool,
+) -> PeerReviewOutput:
+    """
+    Run one agent's peer review call: build the prompt, call its provider,
+    log the prompt, and parse the response into a PeerReviewOutput.
+
+    Shared by every protocol (Crowd, Gossip, Agent 0's loop) so the actual
+    peer-review mechanics - prompt construction, the provider call, response
+    parsing - live in exactly one place instead of being copied per protocol.
+    Each protocol still owns its own control flow around this call (event
+    streaming, orchestrator hookup, etc.), since that genuinely differs.
+    """
+    if dry_run:
+        return peer_reviewer.parse(
+            reviewer_name=agent.name, cycle=cycle, raw="[dry-run]",
+            all_contributions=all_contributions,
+        )
+
+    ecu_info = build_ecu_info_str(hub, cycle, agent.name)
+    prompt = peer_reviewer.build_prompt(
+        reviewer_name=agent.name,
+        reviewer_contribution=all_contributions.get(agent.name, ""),
+        all_contributions=all_contributions,
+        cycle=cycle,
+        item_context=item_context,
+        ecu_info=ecu_info,
+        reviewer_role=agent.role,
+        agent_histories=agent_histories,
+        collect_importance_votes=collect_importance_votes,
+    )
+    try:
+        from core.providers import get_provider
+        pr_kwargs = {"json_mode": True} if agent.provider == "Google" else {}
+        raw = get_provider(agent.provider).complete(
+            model=agent.model,
+            system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
+            user_message=prompt,
+            max_tokens=800,
+            temperature=agent.temperature,
+            **pr_kwargs,
+        )
+    except Exception as exc:
+        raw = f"[ERROR: {exc}]"
+
+    hub.log_prompt(cycle, agent.name, "peer_review", prompt=prompt, response=raw)
+    return peer_reviewer.parse(
+        reviewer_name=agent.name, cycle=cycle, raw=raw, all_contributions=all_contributions,
+    )
 
 
 @dataclass

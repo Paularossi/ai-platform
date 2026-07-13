@@ -54,6 +54,7 @@ st.markdown(
 pg = st.navigation([
     st.Page("pages/1_Welcome.py", title="Setup", icon=":material/tune:", default=True),
     st.Page("pages/5_Run.py", title="Debate", icon=":material/forum:"),
+    st.Page("pages/6_History.py", title="History", icon=":material/history:"),
 ], position="sidebar")
 pg.run()
 
@@ -61,4 +62,3 @@ pg.run()
 # - add cost estimate?
 # - show progress bar for deliberation?
 # - show full summary at the end? e.g. final weights, etc.
-# - 

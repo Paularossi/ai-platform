@@ -19,10 +19,15 @@ this module only owns the outer loop and Agent 0 integration. The debate
 round style is fixed to Simultaneous (Crowd-style) for now; Agent 0 does not
 yet choose the protocol.
 
-The Orchestrator (ECU weight search) is never constructed in this mode —
-ECU weights stay fixed at their initial config values. Social welfare is
-still computed and logged every round, and is one of the signals fed to
-Agent 0, but nothing here optimises it directly.
+The Orchestrator always runs in this mode (fixed cadence, never a per-debate
+opt-out): weight optimisation via participatory importance votes is core
+platform mechanism, not something a debate's designer gets to switch off.
+This is what makes the ECU visibility condition (T/S/O) meaningful — under
+Transparent/Semi-transparent, agents are watching real, moving numbers, not
+a static value fixed at round 0. The one exception: the update is skipped on
+the debate's actual final round (known only after Agent 0's decide() call,
+since it can end any round) — a gradient step no agent will ever act on
+shouldn't be folded into the weights reported as "final".
 """
 
 from __future__ import annotations
@@ -35,8 +40,8 @@ from core.agent import Agent
 from core.agent_zero import AgentZero
 from core.ecu import CoalitionTracker, EcuLedger, PeerReviewRound
 from core.hub import CommunicationHub
-from core.protocols import build_ecu_info_str
-from core.providers import get_provider
+from core.orchestrator import Orchestrator
+from core.protocols import run_peer_review_for_agent
 
 
 def _build_agent_notes(
@@ -106,55 +111,39 @@ def _run_peer_review_round(
     coalition_tracker: CoalitionTracker | None,
     ledger: EcuLedger | None,
     dry_run: bool,
-) -> None:
+    collect_importance_votes: bool,
+) -> list:
     """
     Phase 2 — peer review. Reuses hub.compute_ecus_for_round() and
     ledger.record_social_welfare(), which already read the roster dynamically
-    (hub.agent_names), so no fixed-n assumptions leak in here.
+    (hub.agent_names), so no fixed-n assumptions leak in here. Peer review
+    itself can never be skipped, even on what might be the final round —
+    Agent 0's decide() call needs this round's scores/coalition/SW as input
+    to decide whether to end, so it structurally cannot run before peer
+    review does.
+
+    collect_importance_votes : bool
+        Whether to also ask for the Orchestrator's importance vote in the
+        same prompt. Only the caller knows for certain whether the update
+        will be skipped afterward (see _maybe_update_weights) — pass False
+        only when that's already guaranteed (hitting the hard max_rounds
+        cap), since "Agent 0 might end early" isn't knowable until after
+        this call returns.
+
+    Returns this round's PeerReviewOutput list.
     """
     if not all_contributions:
-        return
+        return []
 
     item_context = ", ".join(f"{k}: {v}" for k, v in hub.item_data.items())
     agent_histories = hub.build_review_history(cycle)
     current_agents = [agents_by_name[n] for n in hub.agent_names if n in agents_by_name]
 
     for agent in current_agents:
-        ecu_info = build_ecu_info_str(hub, cycle, agent.name)
-        if dry_run:
-            review = peer_reviewer.parse(
-                reviewer_name=agent.name, cycle=cycle, raw="[dry-run]",
-                all_contributions=all_contributions,
-            )
-        else:
-            prompt = peer_reviewer.build_prompt(
-                reviewer_name=agent.name,
-                reviewer_contribution=all_contributions.get(agent.name, ""),
-                all_contributions=all_contributions,
-                cycle=cycle,
-                item_context=item_context,
-                ecu_info=ecu_info,
-                reviewer_role=agent.role,
-                agent_histories=agent_histories,
-                collect_importance_votes=False,  # Orchestrator disabled in this mode
-            )
-            try:
-                pr_kwargs = {"json_mode": True} if agent.provider == "Google" else {}
-                raw = get_provider(agent.provider).complete(
-                    model=agent.model,
-                    system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
-                    user_message=prompt,
-                    max_tokens=800,
-                    temperature=agent.temperature,
-                    **pr_kwargs,
-                )
-            except Exception as exc:
-                raw = f"[ERROR: {exc}]"
-            hub.log_prompt(cycle, agent.name, "peer_review", prompt=prompt, response=raw)
-            review = peer_reviewer.parse(
-                reviewer_name=agent.name, cycle=cycle, raw=raw,
-                all_contributions=all_contributions,
-            )
+        review = run_peer_review_for_agent(
+            agent, hub, cycle, peer_reviewer, all_contributions,
+            item_context, agent_histories, collect_importance_votes, dry_run,
+        )
         hub.submit_peer_review(review)
 
     round_reviews = [r for r in hub.peer_review_log if r.cycle == cycle]
@@ -163,6 +152,31 @@ def _run_peer_review_round(
     if ledger:
         hub.compute_ecus_for_round(cycle)
         ledger.record_social_welfare(cycle, round_reviews)
+
+    return round_reviews
+
+
+def _maybe_update_weights(
+    orchestrator: Orchestrator | None,
+    ledger: EcuLedger | None,
+    cycle: int,
+    round_reviews: list,
+    is_final_round: bool,
+) -> None:
+    """
+    Apply the Orchestrator's gradient step for this round, unless it's the
+    debate's actual final round. Skipping on the true final round means the
+    weights an agent never got to act on don't get folded in — the reported
+    "final" weights are the ones that were genuinely operative during the
+    last round, not a step computed after the debate was already over.
+    """
+    if not (orchestrator and ledger and round_reviews) or is_final_round:
+        return
+    if orchestrator.should_update(cycle, is_final_cycle=False):
+        importance_votes = {
+            r.reviewer_name: r.importance_votes for r in round_reviews if r.importance_votes
+        }
+        orchestrator.update(cycle=cycle, ledger=ledger, importance_votes=importance_votes)
 
 
 def run_agent_zero_experiment(
@@ -241,14 +255,17 @@ def run_agent_zero_experiment(
         instructions_cfg["guideline_notes"] = init_result["guideline_notes"]
 
     ecu_cfg = cfg.setdefault("ecu", {})
-    ecu_cfg["enabled"] = True  # foundational to this mode — not a human-configurable toggle
-    ecu_cfg.setdefault("include_self_assessment", False)
+    ecu_cfg["enabled"] = True  # foundational to this mode - not a human-configurable toggle
+    ecu_cfg["include_self_assessment"] = False
     if not ecu_cfg.get("dimensions"):
         ecu_cfg["dimensions"] = init_result["ecu_dimensions"]
     if "coalition_threshold" not in ecu_cfg:
         ecu_cfg["coalition_threshold"] = init_result["coalition_threshold"]
     if "info_condition" not in ecu_cfg:
         ecu_cfg["info_condition"] = init_result["info_condition"]
+    # Weight optimisation runs every round forcing these rather than building an Orchestrator by hand here
+    ecu_cfg["orchestrator_enabled"] = True
+    ecu_cfg["orchestrator_every"] = 1
 
     protocol_cfg = cfg.setdefault("protocol", {})
     if "visibility_mode" not in protocol_cfg:
@@ -264,9 +281,7 @@ def run_agent_zero_experiment(
     agent_names = list(agents_by_name.keys())
 
     peer_reviewer = build_peer_reviewer(cfg, review_depth)
-    ledger, coalition, _ = build_ecu_components(cfg, agent_names, review_depth)
-    # Orchestrator is deliberately discarded (`_`) — ECU weights stay fixed
-    # at their initial config values in Agent 0 mode.
+    ledger, coalition, orchestrator = build_ecu_components(cfg, agent_names, review_depth)
 
     hub = build_hub("item_0", {"topic": topic}, cfg, agent_names, ledger)
 
@@ -305,10 +320,17 @@ def run_agent_zero_experiment(
 
         # ── Phase 1 + 2 — reuse existing contribution/peer-review/ECU logic ──
         round_contributions = _run_debate_round(hub, cycle, agents_by_name, dry_run)
+        round_reviews: list = []
         if peer_reviewer:
-            _run_peer_review_round(
+            # We only know for certain the weight update will be skipped
+            # (see _maybe_update_weights below) when this round hits the hard
+            # max_rounds cap — Agent 0 ending early isn't knowable yet, since
+            # its decision needs this round's peer review as input.
+            is_last_possible_round = cycle >= max_rounds - 1
+            round_reviews = _run_peer_review_round(
                 hub, cycle, round_contributions, agents_by_name,
                 peer_reviewer, coalition, ledger, dry_run,
+                collect_importance_votes=not is_last_possible_round,
             )
 
         # ── Agent 0 call ──────────────────────────────────────────────────
@@ -338,6 +360,13 @@ def run_agent_zero_experiment(
         )
         decision = agent_zero.decide(context, hub.agent_names)
         own_history.append({"cycle": cycle, "reasoning": decision["reasoning"]})
+
+        # Now that Agent 0's decision is known, we know whether this is the
+        # debate's actual final round — either it hit the hard max_rounds
+        # bound, or Agent 0 is ending it right here. Only now is it safe to
+        # apply (or skip) the Orchestrator's weight update for this round.
+        is_final_round = decision["end_debate"] or (cycle >= max_rounds - 1)
+        _maybe_update_weights(orchestrator, ledger, cycle, round_reviews, is_final_round)
 
         # Log Agent 0's own call alongside contribution/peer_review entries so
         # it's inspectable in prompt_log rather than invisible. Logging the
@@ -392,9 +421,9 @@ def run_agent_zero_experiment(
         ecu_earned_this_round = {rec.agent_name: round(rec.ecu_earned, 3) for rec in cycle_records}
 
         # ── Compact, human-readable per-round record ─────────────────────
-        # Contributions are stored in full here (this is the primary readable
-        # record) — the truncation used to live only in "debug", but that
-        # buried the actual argument text a reader most wants to see.
+        # Contributions are stored in full here, not truncated: this is the
+        # primary readable record, and the argument text is what a reader
+        # most wants to see.
         round_summaries.append({
             "cycle": cycle,
             "roster": roster_specs,
@@ -403,6 +432,7 @@ def run_agent_zero_experiment(
             "dimension_scores": dimension_scores,
             "ecu_earned_this_round": ecu_earned_this_round,
             "ecu_balances": dict(hub.ecu_balances),
+            "ecu_weights": dict(ledger.ecu_weights) if ledger else {},
             "social_welfare": (
                 ledger.social_welfare_history[-1]["social_welfare"]
                 if ledger and ledger.social_welfare_history else None
@@ -488,6 +518,7 @@ def run_agent_zero_experiment(
             ],
             "coalition_history": coalition.to_dict() if coalition else {},
             "ecu_ledger": ledger.to_dict() if ledger else {},
+            "orchestrator": orchestrator.to_dict() if orchestrator else {},
             "prompt_log": hub.prompt_log,  # the one place with full raw prompts + responses
         },
     }

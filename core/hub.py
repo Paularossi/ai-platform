@@ -170,13 +170,12 @@ class CommunicationHub:
                 ecu_balances = self.ledger.balances
                 ecu_weights = dict(self.ledger.ecu_weights)
             elif self.ecu_info_condition == "semi-transparent":
-                import random
                 own = self.ledger.balance_for(agent_name)
                 ecu_balances = {agent_name: own}
-                ecu_weights = {
-                    k: round(v * random.uniform(0.8, 1.2), 2)
-                    for k, v in self.ledger.ecu_weights.items()
-                }
+                # Cached per cycle on the ledger so this matches whatever the
+                # Phase 2 peer-review prompt shows for the same cycle - see
+                # EcuLedger.noisy_weights_for_cycle().
+                ecu_weights = self.ledger.noisy_weights_for_cycle(cycle)
 
         return ContextPacket(
             item_id=self.item_id,

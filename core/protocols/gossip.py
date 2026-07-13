@@ -31,9 +31,8 @@ from collections.abc import Iterator
 from typing import Any
 
 from core.agent import Agent
-from core.providers import get_provider
 from core.hub import CommunicationHub
-from core.protocols import RunEvent, build_ecu_info_str
+from core.protocols import RunEvent, run_peer_review_for_agent
 from core.state import AgentOutput
 
 
@@ -147,46 +146,10 @@ class GossipProtocol:
         agent_histories = hub.build_review_history(cycle_idx)
 
         for agent in ordered_agents:
-            ecu_info = build_ecu_info_str(hub, cycle_idx, agent.name)
-            if self.peer_reviewer.dry_run:
-                review = self.peer_reviewer.parse(
-                    reviewer_name=agent.name,
-                    cycle=cycle_idx,
-                    raw="[dry-run]",
-                    all_contributions=all_contributions,
-                )
-            else:
-                prompt = self.peer_reviewer.build_prompt(
-                    reviewer_name=agent.name,
-                    reviewer_contribution=all_contributions.get(agent.name, ""),
-                    all_contributions=all_contributions,
-                    cycle=cycle_idx,
-                    item_context=item_context,
-                    ecu_info=ecu_info,
-                    reviewer_role=agent.role,
-                    agent_histories=agent_histories,
-                    collect_importance_votes=collect_votes,
-                )
-                try:
-                    pr_kwargs = {"json_mode": True} if agent.provider == "Google" else {}
-                    raw = get_provider(agent.provider).complete(
-                        model=agent.model,
-                        system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
-                        user_message=prompt,
-                        max_tokens=800,
-                        temperature=agent.temperature,
-                        **pr_kwargs,
-                    )
-                except Exception as exc:
-                    raw = f"[ERROR: {exc}]"
-                hub.log_prompt(cycle_idx, agent.name, "peer_review", prompt=prompt, response=raw)
-                review = self.peer_reviewer.parse(
-                    reviewer_name=agent.name,
-                    cycle=cycle_idx,
-                    raw=raw,
-                    all_contributions=all_contributions,
-                )
-
+            review = run_peer_review_for_agent(
+                agent, hub, cycle_idx, self.peer_reviewer, all_contributions,
+                item_context, agent_histories, collect_votes, self.peer_reviewer.dry_run,
+            )
             hub.submit_peer_review(review)
             yield RunEvent(
                 kind="peer_review",

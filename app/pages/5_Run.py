@@ -141,6 +141,11 @@ def _render_round(round_summary: dict, container) -> None:
                     rows.append(row)
                 st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
+            weights = round_summary.get("ecu_weights", {})
+            if weights:
+                weights_str = "  ·  ".join(f"{k}: {v:.3f}" for k, v in weights.items())
+                st.caption(f"ECU weights after this round: {weights_str}")
+
             coalition = round_summary.get("coalition", [])
             if len(coalition) >= 2:
                 st.markdown(f"**Coalition:** {', '.join(coalition)}")
@@ -187,7 +192,7 @@ def _show_result(result: dict) -> None:
                 col.metric(name, f"{bal:.3f}")
 
     timestamp = datetime.now(_AMS).strftime("%Y%m%d_%H%M")
-    dl1, dl2, dl3 = st.columns(3)
+    dl1, dl2, dl3, dl4 = st.columns(4)
     with dl1:
         brief_bytes = result["final_brief"].encode()
         st.download_button(
@@ -207,6 +212,23 @@ def _show_result(result: dict) -> None:
             use_container_width=True,
         )
     with dl3:
+        transcript = {
+            "topic": topic,
+            "rounds": [
+                {"round": r["cycle"] + 1, "contributions": r["contributions"]}
+                for r in result.get("rounds", [])
+            ],
+        }
+        transcript_json = json.dumps(transcript, indent=2, ensure_ascii=False)
+        st.download_button(
+            "Download transcript (.json)",
+            data=transcript_json.encode(),
+            file_name=f"agent0_transcript_{timestamp}.json",
+            mime="application/json",
+            use_container_width=True,
+            help="Just what each agent said, round by round. No scores, no reasoning, no metadata.",
+        )
+    with dl4:
         full_json = json.dumps(result, indent=2, ensure_ascii=False, default=str)
         st.download_button(
             "Download full log (.json)",
@@ -255,6 +277,15 @@ if "az_result" not in st.session_state:
         )
     st.session_state.az_result = result
     st.session_state.az_stream_brief = True  # animate the brief once, right after this run
+
+    try:
+        from core.db import ensure_schema, save_experiment
+        ensure_schema()
+        save_experiment(result, cfg)
+    except Exception as exc:
+        # Never let a database hiccup take down a finished debate - the
+        # person still gets their brief and downloads either way.
+        st.caption(f"Note: this run wasn't saved to the shared log ({exc}).")
 else:
     # Cached result (e.g. after a download-button rerun) - the live callbacks
     # that rendered the design panel and each round only fire during the run
