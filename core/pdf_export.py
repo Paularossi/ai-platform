@@ -24,13 +24,18 @@ import io
 import os
 import re
 
+from reportlab.lib import colors
 from reportlab.lib.enums import TA_JUSTIFY
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate
+from reportlab.platypus import HRFlowable, ListFlowable, ListItem, Paragraph, SimpleDocTemplate
+
+# Matches a markdown thematic break on its own line: ---, ***, ___ (3+ chars,
+# optionally spaced, e.g. "- - -"). Rendered as an actual rule rather than literal dashes.
+_THEMATIC_BREAK_RE = re.compile(r"^(?:-\s*){3,}$|^(?:\*\s*){3,}$|^(?:_\s*){3,}$")
 
 # (regular, bold, italic, bold-italic) paths for the first broad-coverage
 # Unicode font found on the host. Checked in order; Segoe UI covers Windows
@@ -175,15 +180,18 @@ def brief_to_pdf_bytes(brief_text: str, topic: str) -> bytes:
             flush_paragraph()
             flush_list()
             continue
-        if line.startswith("### "):
+        if _THEMATIC_BREAK_RE.match(line):
             flush_paragraph(); flush_list()
-            story.append(Paragraph(_inline_markdown_to_html(line[4:]), h3_style))
-        elif line.startswith("## "):
+            story.append(HRFlowable(
+                width="100%", thickness=0.6, color=colors.HexColor("#cccccc"),
+                spaceBefore=10, spaceAfter=10,
+            ))
+        elif (heading_match := re.match(r"^(#{1,6})\s+(.+)", line)):
+            # Any heading depth (#-######), so level 1-2 share h2 and everything level 3+ shares h3
             flush_paragraph(); flush_list()
-            story.append(Paragraph(_inline_markdown_to_html(line[3:]), h2_style))
-        elif line.startswith("# "):
-            flush_paragraph(); flush_list()
-            story.append(Paragraph(_inline_markdown_to_html(line[2:]), h2_style))
+            level = len(heading_match.group(1))
+            style = h2_style if level <= 2 else h3_style
+            story.append(Paragraph(_inline_markdown_to_html(heading_match.group(2)), style))
         elif re.match(r"^[-*]\s+", line):
             flush_paragraph()
             list_buffer.append(re.sub(r"^[-*]\s+", "", line))
