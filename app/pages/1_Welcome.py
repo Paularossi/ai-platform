@@ -24,6 +24,7 @@ from core.providers import API_KEY_ENV_VARS, PROVIDER_MODELS, PROVIDERS
 def init_state() -> None:
     defaults = {
         "az_topic": "",
+        "az_brief_instructions": "",
         "az_provider": "Anthropic",
         "az_model": "claude-sonnet-4-6",
         "az_temperature": 0.0,
@@ -55,6 +56,21 @@ with st.container(border=True):
         height=100,
         label_visibility="collapsed",
         key="widget_topic",
+    )
+
+with st.container(border=True):
+    st.subheader("Final brief instructions (optional)")
+    st.caption(
+        "How Agent 0 should structure, format, or shape the brief it writes once the debate ends "
+        " - e.g. section order, length, language (only Agent 0 sees this). "
+    )
+    st.session_state.az_brief_instructions = st.text_area(
+        "Final brief instructions",
+        value=st.session_state.az_brief_instructions,
+        placeholder="e.g. Open with a two-sentence introduction, then a dedicated section on X, then a conclusion.",
+        height=80,
+        label_visibility="collapsed",
+        key="widget_brief_instructions",
     )
 
 with st.container(border=True):
@@ -137,7 +153,10 @@ if st.button("Start debate", type="primary", disabled=not topic_ready, use_conta
 
     st.session_state.experiment_config = {
         "mode": "agent_zero",
-        "task": {"description": st.session_state.az_topic.strip()},
+        "task": {
+            "description": st.session_state.az_topic.strip(),
+            "brief_instructions": st.session_state.az_brief_instructions.strip(),
+        },
         # "instructions" and "ecu" are left unset here on purpose: Agent 0
         # designs them in its initialization call (see core/agent_zero.py).
         "agent_zero": {

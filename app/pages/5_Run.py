@@ -250,7 +250,7 @@ def _show_nav_buttons() -> None:
             st.rerun()
     with nav2:
         if st.button("Start new debate", use_container_width=True, type="primary"):
-            for key in ("experiment_config", "az_result", "az_topic"):
+            for key in ("experiment_config", "az_result", "az_topic", "az_brief_instructions"):
                 st.session_state.pop(key, None)
             st.switch_page("pages/1_Welcome.py")
 

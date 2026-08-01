@@ -22,27 +22,33 @@ Note: check [this](https://github.com/Mathews-Tom/Agentic-Design-Patterns) book 
 ```
 ai-platform/
 ├── app/
-│   ├── Main.py                  # Streamlit entry point
+│   ├── Main.py                  # Streamlit entry point - nav: Setup / Debate / History
 │   ├── components/utils.py      # restore_draft() helper
 │   └── pages/
-│       ├── 1_Welcome.py         # Step 1: experiment name, topic description
-│       ├── 2_Agent Setup.py     # Step 2: agents, protocol, ECU settings
-│       ├── 3_Instructions.py    # Step 3: base instructions, per-agent overrides
-│       ├── 4_Review.py          # Step 4: review config, save/load draft, launch
-│       └── 5_Run.py             # Run page: live feed, downloads, nav buttons
+│       ├── 1_Welcome.py         # Setup: Agent 0 topic entry, moderator model, hard limits
+│       ├── 5_Run.py             # Debate: live feed, downloads (md/pdf/json), nav buttons
+│       ├── 6_History.py         # History: browse past debates from the shared Supabase log
+│       └── 2_Agent Setup.py, 3_Instructions.py, 4_Review.py
+│                                 # Manual-mode step UI - not registered in Main.py's
+│                                 # navigation; manual mode still works as a config shape,
+│                                 # via core/runner.py and the batch runner below
 ├── core/
 │   ├── state.py                 # AgentOutput, PeerReviewOutput dataclasses
 │   ├── hub.py                   # CommunicationHub: routing, context, logging
 │   ├── agent.py                 # Agent: prompt construction, LLM call, parsing
+│   ├── agent_zero.py             # AgentZero: Agent 0 mode's super-agent (init/decide/brief)
 │   ├── providers.py             # LLM provider wrappers (OpenAI, Anthropic, Google)
 │   ├── ecu.py                   # PeerReviewRound, CoalitionTracker, EcuLedger
 │   ├── orchestrator.py          # Orchestrator: importance-vote gradient (Algorithm 1)
 │   ├── orchestrator_sandbox.py  # Archived: coordinate-search version (not used)
 │   ├── runner.py                # Shared construction helpers (used by UI and batch runner)
+│   ├── pdf_export.py            # Renders an Agent 0 final brief to PDF
+│   ├── db.py                    # Supabase-backed persistent debate log (History page)
 │   └── protocols/
 │       ├── __init__.py          # RunEvent dataclass, build_ecu_info_str helper
 │       ├── crowd.py             # Simultaneous protocol (blind Phase 1)
-│       └── gossip.py            # Sequential protocol (origination/anchoring)
+│       ├── gossip.py            # Sequential protocol (origination/anchoring)
+│       └── agent_zero_loop.py   # Agent 0 mode's dynamic outer loop
 ├── experiments/
 │   ├── run_experiment.py        # Generic batch runner (no UI required)
 │   └── chess_test.json          # Example UI draft (single scenario)
@@ -99,7 +105,21 @@ ai-platform/
    ```
 ---
 
-## Experiment flow (UI - 4 steps)
+## Agent 0 mode (the live app)
+
+The Streamlit app's actual navigation ([app/Main.py](app/Main.py)) only wires up three pages - **Setup → Debate → History** - and Agent 0 mode is the only thing they run. The four-step manual-mode UI described below still exists as files under `app/pages/`, but isn't registered in the app's navigation; manual mode itself is still fully supported as a config shape, just via [core/runner.py](core/runner.py) and the batch runner rather than that UI.
+
+**Setup** ([1_Welcome.py](app/pages/1_Welcome.py)) - two text fields. **Topic** is the only required one: the deliberation question, shown to Agent 0 and to every debating agent every round. **Final brief instructions** (optional) is where you steer *how* Agent 0 writes its final brief - section order, length, language, anything about the brief's shape (nothing about it is prescribed in code; see "No hardcoded prompts" below). The two are kept structurally separate on purpose: brief instructions reach only Agent 0's own initialization/decision calls (`cfg["task"]["brief_instructions"]`), never `hub.item_data`, so a debating agent can never mistake "how the eventual brief should look" for something to argue about in its own contribution. Setup also picks which model runs Agent 0 itself, and sets the hard bounds (`max_rounds`, `max_agents`, `max_total_spawns`) that cap runaway cost regardless of what Agent 0 decides.
+
+**Debate** ([5_Run.py](app/pages/5_Run.py)) - a live per-round feed (contributions, peer-review scores, ECU balances, Agent 0's reasoning and any roster/instruction changes), then the final brief with four downloads: the brief as Markdown or PDF, a plain transcript JSON (just what each agent said, round by round), and the full log JSON (every prompt/response, scores, ECU ledger, coalition history).
+
+**History** ([6_History.py](app/pages/6_History.py)) - every debate run from the live app is logged to a shared Supabase (Postgres) database via [core/db.py](core/db.py), independent of any one user's session. This page lists past debates (topic, model, round count, how it ended) and can show any past debate's stored final brief on demand. Full contribution text, per-round scores, and the raw prompt log are *not* persisted here - only the brief - so those still come from the Debate page's downloads at run time, not from History.
+
+---
+
+## Manual mode config (batch runner) - OUTDATED (see other branch)
+
+The steps below describe the config shape manual mode uses - agents, protocol, ECU settings, instructions - built either by hand as JSON or via the `2_Agent Setup.py` / `3_Instructions.py` / `4_Review.py` pages (present under `app/pages/` but not part of the live app's navigation - see above). This shape is what `core/runner.py` and `experiments/run_experiment.py` (the batch runner) consume; it's still the way to run fixed-roster, human-configured deliberations rather than Agent 0-designed ones.
 
 ### Step 1 — Overview
 Name, author, and a brief description of the experiment for your own reference. The actual deliberation question is set in Step 3.
@@ -275,9 +295,9 @@ Adding a new provider: subclass `LLMProvider` in `core/providers.py`, add it to 
 
 ## Output
 
-After a UI run, two downloads are available:
+This expands on the two file kinds the batch runner writes to `experiments/results/` (see "Batch experiments" above). The live app's Agent 0 mode instead offers downloads directly in the browser (brief as Markdown/PDF, transcript JSON, full log JSON) - see "Agent 0 mode (the live app)" above.
 
-**Results CSV** - one row per item:
+**Results CSV** - one row per scenario/item:
 - `coalition_final`, `coalition_size`, `coalition_reached`
 - `ecu_{AgentName}` - final cumulative ECU balance
 - `pr_{AgentName}_{dimension}` - mean peer score from last round
@@ -304,7 +324,9 @@ python tests/test_pipeline.py
 
 ## Key design decisions
 
-**No hardcoded prompts.** System prompts contain only user-defined content (role description, base instructions, guidelines, dimension rubrics). The deliberation item is always injected at runtime and never baked into the instructions. Dimension rubrics are defined entirely in the experiment config and rendered verbatim into the peer review prompt.
+**No hardcoded prompts.** System prompts contain only user-defined content (role description, base instructions, guidelines, dimension rubrics). The deliberation item is always injected at runtime and never baked into the instructions. Dimension rubrics are defined entirely in the experiment config and rendered verbatim into the peer review prompt. The same principle applies to Agent 0's final brief: its length, structure, and language aren't prescribed anywhere in code (see [core/agent_zero.py](core/agent_zero.py) - the system prompt only requires it be substantive, not any particular shape). Format instructions belong in the topic pre-prompt, same as everything else Agent 0 decides.
+
+**Brief export doesn't assume English or Latin script.** [core/pdf_export.py](core/pdf_export.py) titles the PDF from the brief's own leading heading - in whatever language Agent 0 wrote it - falling back to the topic text rather than a fixed label, and renders with a bundled/system Unicode font instead of ReportLab's base14 Helvetica so Cyrillic, Greek, Vietnamese, and similar scripts display correctly instead of dropping to blanks. This doesn't extend to right-to-left scripts (Arabic, Hebrew) or CJK/Indic scripts, which need bidi reordering and complex text shaping that ReportLab's Paragraph flowable doesn't do - a real gap, not a solved one.
 
 **ECU feedback without direction.** Under T or S conditions, agents are told what they can observe (scores, balances, weights) but are given no instruction on how to respond to this information. The goal is to observe whether agents adapt their strategy organically, not to coach them toward higher scores.
 

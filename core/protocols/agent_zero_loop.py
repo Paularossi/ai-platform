@@ -191,9 +191,13 @@ def run_agent_zero_experiment(
     Parameters
     ----------
     cfg : dict
-        Experiment config. Must contain cfg["task"]["description"] (the topic),
-        cfg["ecu"] (dimensions/thresholds — same shape as manual mode), and
-        cfg["agent_zero"] (provider, model, max_rounds, max_agents, max_total_spawns).
+        Experiment config. Must contain cfg["task"]["description"] (the topic
+        shown to Agent 0 and to every debating agent every round), optionally
+        cfg["task"]["brief_instructions"] (final-brief-only instructions,
+        shown to Agent 0 alone - never folded into hub.item_data, so debating
+        agents never see it), cfg["ecu"] (dimensions/thresholds — same shape
+        as manual mode), and cfg["agent_zero"] (provider, model, max_rounds,
+        max_agents, max_total_spawns).
     dry_run : bool
         Skip all LLM calls (placeholder outputs), including Agent 0's own calls.
     on_round : callable | None
@@ -226,6 +230,11 @@ def run_agent_zero_experiment(
     az_temperature = float(az_cfg.get("temperature", 0.0))
 
     topic = cfg.get("task", {}).get("description", "")
+    # Final-brief-only instructions - deliberately kept out of hub.item_data
+    # below, so they never reach an individual debating agent's per-round
+    # prompt (core/agent.py renders item_data verbatim into every contribution
+    # prompt). Only Agent 0's own initialize()/build_context() calls see this.
+    brief_instructions = cfg.get("task", {}).get("brief_instructions", "")
 
     agent_zero = AgentZero(
         provider=az_provider, model=az_model, max_agents=max_agents, dry_run=dry_run,
@@ -245,7 +254,7 @@ def run_agent_zero_experiment(
     # human-provided value in cfg (e.g. from a hand-authored batch config)
     # is respected as an override; anything left unset is Agent 0's call,
     # not a hardcoded default.
-    init_result = agent_zero.initialize(topic)
+    init_result = agent_zero.initialize(topic, brief_instructions=brief_instructions)
     initial_roster = init_result["agents"][:max_agents]
 
     instructions_cfg = cfg.setdefault("instructions", {})
@@ -357,6 +366,7 @@ def run_agent_zero_experiment(
             agent_notes=agent_notes,
             total_spawns=total_spawns,
             max_total_spawns=max_total_spawns,
+            brief_instructions=brief_instructions,
         )
         decision = agent_zero.decide(context, hub.agent_names)
         own_history.append({"cycle": cycle, "reasoning": decision["reasoning"]})

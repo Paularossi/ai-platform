@@ -105,9 +105,10 @@ substitute for acting on it.
 
 Keep your `reasoning` field short — 2-4 sentences capturing the signal(s) behind this \
 round's decision. If you decide to end the debate, reserve most of your response for a \
-thorough `final_brief` (roughly 200-500 words) — a short or missing brief means the \
-decision to end will be rejected and the debate will continue regardless of your \
-reasoning, so do not shortchange it."""
+substantive `final_brief`. Its length, structure, and language are yours to judge from \
+the topic and the debate itself — nothing about its shape is prescribed here. A missing \
+or clearly truncated brief means the decision to end will be rejected and the debate will \
+continue regardless of your reasoning, so do not shortchange it."""
 
 
 DEFAULT_PROVIDER = "OpenAI"
@@ -291,6 +292,14 @@ def _validate_coalition_threshold(raw: Any) -> float:
     return min(1.0, max(0.0, v))
 
 
+# guards against a truncated/empty final_brief (e.g. the model ran out of max_tokens mid-sentence)
+_MIN_BRIEF_WORDS = 30
+
+
+def _is_substantive_brief(text: str) -> bool:
+    return len(text.split()) >= _MIN_BRIEF_WORDS
+
+
 def _noop_decision(reason: str = "validation failed") -> dict:
     return {
         "reasoning": f"[safe default: {reason}]",
@@ -386,12 +395,10 @@ def _validate_decision(raw: Any, current_roster: list[str], max_agents: int) -> 
 
     end_debate = bool(raw.get("end_debate", False))
     final_brief = str(raw.get("final_brief", "") or "")
-    if end_debate and not final_brief.strip():
-        # An "end" decision with no brief is not actionable — treat as no-op
-        # on the ending part but keep any valid roster edits. This is loud on
-        # purpose: it usually means the response ran out of max_tokens before
-        # writing the brief, which would otherwise silently loop forever.
-        print("[AgentZero] end_debate=true but final_brief is empty — "
+    if end_debate and not _is_substantive_brief(final_brief):
+        # An "end" decision with no (or a trivially short) brief is not actionable 
+        # treat as no-op on the ending part but keep any valid roster edits.
+        print("[AgentZero] end_debate=true but final_brief is missing or too short — "
               "rejecting the end decision and continuing (likely truncated response).")
         end_debate = False
 
@@ -439,12 +446,16 @@ class AgentZero:
         self.temperature = temperature
 
     # ------------------------------------------------------------------
-    def initialize(self, topic: str) -> dict:
+    def initialize(self, topic: str, brief_instructions: str = "") -> dict:
         """
         One-time call: from the topic alone, decide the starting roster, the
         shared base instructions, optional guideline notes, the quality
         dimensions (with rubrics and ECU/SW weights), the coalition
         threshold, and the φ1/φ2/ECU-info-condition visibility settings.
+
+        brief_instructions : str
+            Optional human instructions for the eventual final_brief only (e.g. desired section order),
+            never shown to the debating agents
 
         Returns
         -------
@@ -471,7 +482,14 @@ class AgentZero:
 
         prompt = (
             f"Deliberation topic: {topic}\n\n"
-            f"This is the initialization call — decide the starting roster (at most "
+            + (
+                f"Instructions for the eventual final brief (for you alone - do not fold "
+                f"these into base_instructions or guideline_notes verbatim; only use them to inform choices "
+                f"like roster or guideline notes if doing so would give the debate real "
+                f"material for what the brief will need to cover): {brief_instructions}\n\n"
+                if brief_instructions.strip() else ""
+            )
+            + f"This is the initialization call — decide the starting roster (at most "
             f"{self.max_agents} agents), the shared base instructions, optional guideline "
             "notes, the quality dimensions (with rubrics and weights), the coalition "
             "threshold, and the visibility/review-depth/ECU-information-condition settings, "
@@ -530,6 +548,7 @@ class AgentZero:
         max_own_history: int = 5,
         total_spawns: int | None = None,
         max_total_spawns: int | None = None,
+        brief_instructions: str = "",
     ) -> str:
         """
         Assemble the per-round context packet as a readable text block.
@@ -545,9 +564,20 @@ class AgentZero:
         total_spawns, max_total_spawns : int | None
             Cumulative agents ever created vs. the hard cap — shown so Agent 0
             knows whether an addition is even possible before proposing one.
+        brief_instructions : str
+            Optional human instructions for the eventual final_brief only
+            (see initialize() above) - included here so every decide() call,
+            and the wrap-up write_final_brief() call that reuses this same
+            context string, has it available. Still never reaches the
+            debating agents themselves - it isn't part of hub.item_data.
         """
         lines: list[str] = []
         lines.append(f"Topic: {topic}")
+        if brief_instructions.strip():
+            lines.append(
+                f"Instructions for the final brief (yours alone - never shown to the "
+                f"debating agents): {brief_instructions.strip()}"
+            )
         lines.append(f"Round just completed: {cycle + 1}")
         lines.append("")
 
@@ -614,11 +644,8 @@ class AgentZero:
                 system_prompt=AGENT_ZERO_SYSTEM_PROMPT,
                 user_message=context,
                 schema=DECISION_SCHEMA,
-                # Generous headroom: reasoning + up to a few agent_instructions
-                # + a 200-500 word final_brief can easily exceed 1200 tokens.
-                # Running out mid-response silently drops the brief, which
-                # forces end_debate back to False regardless of intent.
-                max_tokens=4096,
+                # Generous headroom: final_brief length is dictated by the topic, not a fixed prescription (see AGENT_ZERO_SYSTEM_PROMPT)
+                max_tokens=6000,
                 temperature=self.temperature,
             )
             validated = _validate_decision(result, current_roster, self.max_agents)
@@ -659,11 +686,12 @@ class AgentZero:
                       "formed), grounded in the actual contributions made."
                 ),
                 schema=BRIEF_SCHEMA,
-                max_tokens=2000,
+                # See the max_tokens comment in decide() above — same reasoning.
+                max_tokens=4000,
                 temperature=self.temperature,
             )
             brief = str(result.get("final_brief", "") or "").strip()
-            return brief or fallback_summary
+            return brief if _is_substantive_brief(brief) else fallback_summary
         except Exception as exc:
             print(f"[AgentZero] write_final_brief() failed: {exc} — using deterministic fallback summary")
             return fallback_summary

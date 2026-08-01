@@ -154,3 +154,13 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# other files
+experiments/results/
+literature/recommendations deployment.docx
+meeting notes.txt
+.vscode/settings.json
+.gitignore
