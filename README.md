@@ -23,35 +23,29 @@ Note: check [this](https://github.com/Mathews-Tom/Agentic-Design-Patterns) book 
 ai-platform/
 ├── app/
 │   ├── Main.py                  # Streamlit entry point - nav: Setup / Debate / History
-│   ├── components/utils.py      # restore_draft() helper
 │   └── pages/
 │       ├── 1_Welcome.py         # Setup: Agent 0 topic entry, moderator model, hard limits
 │       ├── 5_Run.py             # Debate: live feed, downloads (md/pdf/json), nav buttons
-│       ├── 6_History.py         # History: browse past debates from the shared Supabase log
-│       └── 2_Agent Setup.py, 3_Instructions.py, 4_Review.py
-│                                 # Manual-mode step UI - not registered in Main.py's
-│                                 # navigation; manual mode still works as a config shape,
-│                                 # via core/runner.py and the batch runner below
+│       └── 6_History.py         # History: browse past debates from the shared Supabase log
 ├── core/
 │   ├── state.py                 # AgentOutput, PeerReviewOutput dataclasses
 │   ├── hub.py                   # CommunicationHub: routing, context, logging
 │   ├── agent.py                 # Agent: prompt construction, LLM call, parsing
-│   ├── agent_zero.py             # AgentZero: Agent 0 mode's super-agent (init/decide/brief)
+│   ├── agent_zero.py            # AgentZero: Agent 0 mode's super-agent (init/decide/brief)
 │   ├── providers.py             # LLM provider wrappers (OpenAI, Anthropic, Google)
 │   ├── ecu.py                   # PeerReviewRound, CoalitionTracker, EcuLedger
 │   ├── orchestrator.py          # Orchestrator: importance-vote gradient (Algorithm 1)
-│   ├── orchestrator_sandbox.py  # Archived: coordinate-search version (not used)
 │   ├── runner.py                # Shared construction helpers (used by UI and batch runner)
 │   ├── pdf_export.py            # Renders an Agent 0 final brief to PDF
 │   ├── db.py                    # Supabase-backed persistent debate log (History page)
 │   └── protocols/
-│       ├── __init__.py          # RunEvent dataclass, build_ecu_info_str helper
+│       ├── __init__.py          # RunEvent, shared peer-review + round-finalisation helpers
 │       ├── crowd.py             # Simultaneous protocol (blind Phase 1)
 │       ├── gossip.py            # Sequential protocol (origination/anchoring)
 │       └── agent_zero_loop.py   # Agent 0 mode's dynamic outer loop
 ├── experiments/
 │   ├── run_experiment.py        # Generic batch runner (no UI required)
-│   └── chess_test.json          # Example UI draft (single scenario)
+│   └── chess_test.json          # Example manual-mode config (single scenario)
 ├── tests/
 │   └── test_pipeline.py         # 81-test dry-run pipeline test suite
 ├── literature/
@@ -107,7 +101,7 @@ ai-platform/
 
 ## Agent 0 mode (the live app)
 
-The Streamlit app's actual navigation ([app/Main.py](app/Main.py)) only wires up three pages - **Setup → Debate → History** - and Agent 0 mode is the only thing they run. The four-step manual-mode UI described below still exists as files under `app/pages/`, but isn't registered in the app's navigation; manual mode itself is still fully supported as a config shape, just via [core/runner.py](core/runner.py) and the batch runner rather than that UI.
+The Streamlit app's navigation ([app/Main.py](app/Main.py)) wires up three pages - **Setup → Debate → History** - and Agent 0 mode is the only thing they run. Manual mode (fixed roster, human-configured protocol) has no UI; it is supported as a config shape via [core/runner.py](core/runner.py) and the batch runner.
 
 **Setup** ([1_Welcome.py](app/pages/1_Welcome.py)) - two text fields. **Topic** is the only required one: the deliberation question, shown to Agent 0 and to every debating agent every round. **Final brief instructions** (optional) is where you steer *how* Agent 0 writes its final brief - section order, length, language, anything about the brief's shape (nothing about it is prescribed in code; see "No hardcoded prompts" below). The two are kept structurally separate on purpose: brief instructions reach only Agent 0's own initialization/decision calls (`cfg["task"]["brief_instructions"]`), never `hub.item_data`, so a debating agent can never mistake "how the eventual brief should look" for something to argue about in its own contribution. Setup also picks which model runs Agent 0 itself, and sets the hard bounds (`max_rounds`, `max_agents`, `max_total_spawns`) that cap runaway cost regardless of what Agent 0 decides.
 
@@ -119,12 +113,9 @@ The Streamlit app's actual navigation ([app/Main.py](app/Main.py)) only wires up
 
 ## Manual mode config (batch runner) - OUTDATED (see other branch)
 
-The steps below describe the config shape manual mode uses - agents, protocol, ECU settings, instructions - built either by hand as JSON or via the `2_Agent Setup.py` / `3_Instructions.py` / `4_Review.py` pages (present under `app/pages/` but not part of the live app's navigation - see above). This shape is what `core/runner.py` and `experiments/run_experiment.py` (the batch runner) consume; it's still the way to run fixed-roster, human-configured deliberations rather than Agent 0-designed ones.
+The steps below describe the config shape manual mode uses - agents, protocol, ECU settings, instructions - written by hand as JSON. This shape is what `core/runner.py` and `experiments/run_experiment.py` (the batch runner) consume; it's the way to run fixed-roster, human-configured deliberations rather than Agent 0-designed ones.
 
-### Step 1 — Overview
-Name, author, and a brief description of the experiment for your own reference. The actual deliberation question is set in Step 3.
-
-### Step 2 — Agent Setup
+### Agents and protocol
 
 **Agents:** configure name, provider (OpenAI, Anthropic, or Google), model, and role description. The role description is injected into the system prompt and defines the agent's perspective or mandate.
 
@@ -159,13 +150,8 @@ Under T and S, the system prompt informs agents that their contributions are pee
 
 **Orchestrator:** when enabled, updates ECU weights every K rounds using agents' importance votes (see below).
 
-### Step 3 — Instructions & topic
-Write the deliberation question and base instructions for all agents. Optionally add per-agent prompt overrides and guideline notes. The question is injected into each agent's user message at runtime.
-
-The prompt preview updates live based on the current φ₁ and ECU information condition settings.
-
-### Step 4 — Review
-Inspect the full configuration, save or load a JSON draft, then launch the experiment.
+### Instructions & topic
+Write the deliberation question (`task.description`) and base instructions for all agents. Optionally add per-agent prompt overrides and guideline notes. The question is injected into each agent's user message at runtime.
 
 ---
 
@@ -236,8 +222,6 @@ When enabled, runs every K rounds after peer review completes. Uses an **importa
 
 The $1/t$ schedule satisfies the Robbins-Monro conditions: larger updates early, diminishing over time, converging in ratio as rounds accumulate.
 
-The archived coordinate-search version (sandbox re-runs) is in `orchestrator_sandbox.py` and is not used by the platform.
-
 ---
 
 ## Batch experiments (no UI)
@@ -251,7 +235,7 @@ python experiments/run_experiment.py experiments/congestion_pricing.json --dry-r
 
 **Experiment JSON format** - two variants are accepted:
 
-1. **UI draft** (flat): the JSON saved by the UI's "Save draft" button can be passed directly. The embedded `protocol` block becomes a single scenario.
+1. **Flat config**: a single experiment config with an embedded `protocol` block, which becomes a single scenario.
 
 2. **Batch format**: defines a shared `base` config and a list of `scenarios`, each overriding the `protocol` block:
    ```json
@@ -285,7 +269,7 @@ Three LLM providers are supported. Each is a thin wrapper around its SDK.
 |---|---|---|
 | **OpenAI** | `openai` | `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, `o1`, `o1-mini` |
 | **Anthropic** | `anthropic` | `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
-| **Google** | `google-genai` | `gemini-2.0-flash`, `gemini-2.5-pro`, `gemini-2.5-flash` |
+| **Google** | `google-genai` | `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash` |
 
 Agents from different providers can participate in the same experiment.
 

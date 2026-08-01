@@ -2,9 +2,11 @@
 """
 Shared protocol primitives.
 
-RunEvent is defined here so every protocol (Gossip, Crowd, Duel, Court, ...)
-can emit the same event type and the UI render loop in 6_Run.py needs no changes
-when a new protocol is added.
+RunEvent is defined here so every protocol (Crowd, Gossip, ...) can emit the
+same event type and any consumer of run_iter() needs no changes when a new
+protocol is added. finalize_peer_review_round() holds the end-of-round
+mechanics (coalition, ECU, social welfare, orchestrator update) shared by the
+fixed-roster protocols.
 """
 
 from __future__ import annotations
@@ -103,6 +105,41 @@ def run_peer_review_for_agent(
     )
 
 
+def finalize_peer_review_round(
+    hub: Any,
+    cycle: int,
+    coalition_tracker: Any | None,
+    orchestrator: Any | None,
+    is_final_cycle: bool,
+) -> list[PeerReviewOutput]:
+    """
+    End-of-round mechanics after all of a round's peer reviews are submitted:
+    coalition detection, ECU computation, social welfare recording, and (when
+    due and not on the final cycle) the orchestrator's weight update.
+
+    Shared by the fixed-roster protocols (Crowd, Gossip). Agent 0's loop has
+    its own variant because its weight update must be deferred until Agent 0's
+    end-of-debate decision is known.
+    """
+    round_reviews = [r for r in hub.peer_review_log if r.cycle == cycle]
+
+    if coalition_tracker:
+        coalition_tracker.find_coalition(round_reviews)
+
+    if hub.ledger:
+        hub.compute_ecus_for_round(cycle)
+        hub.ledger.record_social_welfare(cycle, round_reviews)
+
+        if orchestrator and orchestrator.should_update(cycle, is_final_cycle=is_final_cycle):
+            importance_votes = {
+                r.reviewer_name: r.importance_votes
+                for r in round_reviews if r.importance_votes
+            }
+            orchestrator.update(cycle=cycle, ledger=hub.ledger, importance_votes=importance_votes)
+
+    return round_reviews
+
+
 @dataclass
 class RunEvent:
     """
@@ -110,11 +147,10 @@ class RunEvent:
 
     kind == "dispatch"     : hub built a context packet, about to call agent
     kind == "submission"   : agent returned output, hub stored it
-    kind == "aggregate"    : crowd round aggregate computed
     kind == "peer_review"  : one agent's Phase 2 peer review completed
     kind == "ecu_update"   : ECU ledger updated after a full peer review round
     """
-    kind: Literal["dispatch", "submission", "aggregate", "peer_review", "ecu_update"]
+    kind: Literal["dispatch", "submission", "peer_review", "ecu_update"]
     cycle: int
     agent_name: str
     packet: ContextPacket

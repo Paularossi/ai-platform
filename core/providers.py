@@ -312,11 +312,6 @@ class GoogleProvider(LLMProvider):
 _registry: dict[str, LLMProvider] = {}
 
 
-def reset_provider(name: str) -> None:
-    """Evict the cached provider instance so the next call rebuilds with the current env key."""
-    _registry.pop(name, None)
-
-
 def get_provider(name: str) -> LLMProvider:
     """Return the cached provider instance for the given name."""
     if name not in _registry:

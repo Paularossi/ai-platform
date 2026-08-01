@@ -11,7 +11,6 @@ everything needed to build a runnable experiment item:
     build_ecu_components  → (EcuLedger | None, CoalitionTracker | None, Orchestrator | None)
     build_protocol        → CrowdProtocol | GossipProtocol
     build_hub             → CommunicationHub
-    build_item_data       → dict  (from a DataFrame row + column mapping)
     collect_result        → dict  (serialisable result from a completed hub)
     results_to_df         → pd.DataFrame  (flatten a list of result dicts)
 """
@@ -139,9 +138,9 @@ def build_protocol(
         orchestrator=orchestrator,
         dry_run=dry_run,
     )
-    if setting in ("Simultaneous", "Crowd (parallel)"):
+    if setting == "Simultaneous":
         return CrowdProtocol(agents, cfg, **kwargs)
-    elif setting in ("Sequential", "Gossip (sequential)"):
+    elif setting == "Sequential":
         return GossipProtocol(agents, cfg, **kwargs)
     raise ValueError(f"Unknown protocol setting: '{setting}'")
 
@@ -202,15 +201,6 @@ def collect_result(
 # ---------------------------------------------------------------------------
 # DataFrame helpers
 # ---------------------------------------------------------------------------
-
-def build_item_data(row: pd.Series, column_mapping: dict) -> dict:
-    """Build the item_data dict from a DataFrame row using the column mapping."""
-    return {
-        field_name: str(row[col_name])
-        for field_name, col_name in column_mapping.items()
-        if col_name and col_name != "- not mapped -" and col_name in row.index
-    }
-
 
 def _agent_zero_result_row(r: dict) -> dict:
     """Summarise an Agent 0-mode result (different shape from manual mode) into one row."""

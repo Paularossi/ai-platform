@@ -37,6 +37,17 @@ from reportlab.platypus import HRFlowable, ListFlowable, ListItem, Paragraph, Si
 # optionally spaced, e.g. "- - -"). Rendered as an actual rule rather than literal dashes.
 _THEMATIC_BREAK_RE = re.compile(r"^(?:-\s*){3,}$|^(?:\*\s*){3,}$|^(?:_\s*){3,}$")
 
+# Setext heading underlines: a line of only === or only --- directly under a
+# single line of text makes that text a heading (CommonMark). Models emit this
+# often; without it the underline shows up as a stray rule (or literal "===")
+# under an unstyled paragraph line.
+_SETEXT_EQ_RE = re.compile(r"^={3,}$")
+_SETEXT_DASH_RE = re.compile(r"^-{3,}$")
+
+# ATX heading, tolerantly: 1-6 hashes, the space after them optional (models
+# frequently emit "####Heading"), optional closing hashes ("## Title ##").
+_ATX_HEADING_RE = re.compile(r"^(#{1,6})(?!#)\s*(.+?)\s*#*\s*$")
+
 # (regular, bold, italic, bold-italic) paths for the first broad-coverage
 # Unicode font found on the host. Checked in order; Segoe UI covers Windows
 # dev/deploy targets, DejaVu Sans covers the Debian/Ubuntu-based Linux images
@@ -93,7 +104,13 @@ def _resolve_font_names() -> dict[str, str]:
 
 
 def _inline_markdown_to_html(text: str) -> str:
-    """Convert **bold** / *italic* to the inline tags reportlab's Paragraph understands."""
+    """
+    Convert **bold** / *italic* to the inline tags reportlab's Paragraph
+    understands. XML-escapes the text first: Paragraph() parses its input as
+    markup, so an unescaped '<' in the brief (e.g. "x<y") is a hard
+    ValueError that kills the whole export, and '&'/'>' can misrender.
+    """
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
     return text
@@ -113,11 +130,17 @@ def _split_title(brief_text: str, topic: str) -> tuple[str, str, str]:
     while idx < len(lines) and not lines[idx].strip():
         idx += 1
     if idx < len(lines):
-        match = re.match(r"^#{1,3}\s+(.+)", lines[idx].strip())
-        if match:
-            title = match.group(1).strip()
-            remaining = "\n".join(lines[idx + 1:])
-            return title, topic, remaining
+        first = lines[idx].strip()
+        match = _ATX_HEADING_RE.match(first)
+        if match and len(match.group(1)) <= 3 and match.group(2):
+            return match.group(2), topic, "\n".join(lines[idx + 1:])
+        # Setext title: first line of text underlined with === or ---
+        if idx + 1 < len(lines):
+            underline = lines[idx + 1].strip()
+            if first and not first.startswith("#") and (
+                _SETEXT_EQ_RE.match(underline) or _SETEXT_DASH_RE.match(underline)
+            ):
+                return first, topic, "\n".join(lines[idx + 2:])
     return topic, "", brief_text
 
 
@@ -180,13 +203,28 @@ def brief_to_pdf_bytes(brief_text: str, topic: str) -> bytes:
             flush_paragraph()
             flush_list()
             continue
-        if _THEMATIC_BREAK_RE.match(line):
+        is_setext_underline = bool(_SETEXT_EQ_RE.match(line) or _SETEXT_DASH_RE.match(line))
+        if is_setext_underline and len(paragraph_buffer) == 1:
+            # Setext heading: the single buffered text line above this
+            # underline is the heading, not a paragraph followed by a rule.
+            heading_text = paragraph_buffer.pop()
+            style = h2_style if _SETEXT_EQ_RE.match(line) else h3_style
+            story.append(Paragraph(_inline_markdown_to_html(heading_text), style))
+        elif _SETEXT_EQ_RE.match(line):
+            # A stray === with nothing (or a multi-line paragraph) above it:
+            # render a rule rather than leaking literal equals signs into text.
             flush_paragraph(); flush_list()
             story.append(HRFlowable(
                 width="100%", thickness=0.6, color=colors.HexColor("#cccccc"),
                 spaceBefore=10, spaceAfter=10,
             ))
-        elif (heading_match := re.match(r"^(#{1,6})\s+(.+)", line)):
+        elif _THEMATIC_BREAK_RE.match(line):
+            flush_paragraph(); flush_list()
+            story.append(HRFlowable(
+                width="100%", thickness=0.6, color=colors.HexColor("#cccccc"),
+                spaceBefore=10, spaceAfter=10,
+            ))
+        elif (heading_match := _ATX_HEADING_RE.match(line)) and heading_match.group(2):
             # Any heading depth (#-######), so level 1-2 share h2 and everything level 3+ shares h3
             flush_paragraph(); flush_list()
             level = len(heading_match.group(1))

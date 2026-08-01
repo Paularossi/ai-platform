@@ -25,7 +25,6 @@ def _build_system_prompt(
     base_instructions: str,
     guideline_notes: str,
     agent_overrides: dict[str, str],
-    questions: list[dict],
     ecu_info_condition: str = "opaque",
     ecu_dimensions: list[dict] | None = None,
 ) -> str:
@@ -69,23 +68,11 @@ def _build_system_prompt(
             )
         parts.append("")
 
-    if questions:
-        # Text/score-only questions without option codes
-        parts.append("--- Questions ---")
-        parts.append("Answer each question on its own line:")
-        parts.append("  field_name: your answer")
-        parts.append("")
-        for i, q in enumerate(questions, 1):
-            parts.append(f"Q{i}. [{q['field_name']}] {q.get('instruction', '')}")
-        parts.append("")
-
-    # Deliberation mode — no structured questions.
     # Output format is entirely defined by the user's base_instructions.
-
     return "\n".join(parts)
 
 
-def _build_user_message(packet: ContextPacket, questions: list[dict]) -> str:
+def _build_user_message(packet: ContextPacket) -> str:
     parts: list[str] = []
 
     # ── Item data (from dataset) ──────────────────────────────────────────────
@@ -163,13 +150,9 @@ def _build_user_message(packet: ContextPacket, questions: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _parse_deliberation(
-    raw_text: str,
-    questions: list[dict],
-) -> tuple[str, dict, float | None, list[str], list[str]]:
+def _parse_contribution(raw_text: str) -> str:
     """
-    Parse free-text deliberation response.
-    Extracts the main contribution, confidence (if reported), pros and cons.
+    Parse a free-text deliberation response into a single contribution string.
 
     Also handles the case where a model (e.g. Gemini in JSON mode) wraps
     the contribution in a JSON envelope like {"response": "..."}.
@@ -184,68 +167,22 @@ def _parse_deliberation(
                 raw_text = str(obj["response"])
         except Exception:
             pass  # not valid JSON — continue with raw_text as-is
-    pros: list[str] = []
-    cons: list[str] = []
-    confidence: float | None = None
+
     contribution_lines: list[str] = []
-
-    lines = raw_text.splitlines()
-    in_pros = False
-    in_cons = False
-    in_contribution = True
-
-    for line in lines:
+    for line in raw_text.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
-
-        if stripped.lower().startswith("pros:") or stripped.lower() == "pros":
-            in_pros, in_cons, in_contribution = True, False, False
+        # Skip Setext-style underline markers (e.g. "===" or "---" directly
+        # under a title line) — meaningless once lines are flattened below.
+        if re.fullmatch(r"[=\-]{3,}", stripped):
             continue
-        if stripped.lower().startswith("cons:") or stripped.lower() == "cons":
-            in_cons, in_pros, in_contribution = True, False, False
-            continue
+        # Strip leading Markdown heading markers (#, ##, ...) as some models open with a heading line. Since all lines are
+        # flattened into one paragraph below, a leading "#" would make the entire joined contribution render as one giant heading.
+        stripped = re.sub(r"^#{1,6}\s*", "", stripped)
+        contribution_lines.append(stripped)
 
-        # Confidence line: "confidence: 0.85"
-        conf_match = re.match(r"^confidence\s*:\s*([0-9.]+)", stripped, re.IGNORECASE)
-        if conf_match:
-            in_contribution = False
-            try:
-                v = float(conf_match.group(1))
-                confidence = v / 100.0 if v > 1.0 else v
-            except ValueError:
-                pass
-            continue
-
-        if in_pros:
-            text = stripped[1:].strip() if stripped.startswith("-") else stripped
-            pros.append(text)
-        elif in_cons:
-            text = stripped[1:].strip() if stripped.startswith("-") else stripped
-            cons.append(text)
-        elif in_contribution:
-            # Skip Setext-style underline markers (e.g. "===" or "---" directly
-            # under a title line) — meaningless once lines are flattened below.
-            if re.fullmatch(r"[=\-]{3,}", stripped):
-                continue
-            # Strip leading Markdown heading markers (#, ##, ...) as some models open with a heading line. Since all lines are
-            # flattened into one paragraph below, a leading "#" would make the entire joined contribution render as one giant heading.
-            stripped = re.sub(r"^#{1,6}\s*", "", stripped)
-            contribution_lines.append(stripped)
-
-    # For text-only questions, also parse simple field: answer lines
-    if questions:
-        field_answers: dict[str, str] = {}
-        field_types = {q["field_name"]: q["field_type"] for q in questions}
-        for line in lines:
-            m = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+)$", line)
-            if m and m.group(1) in field_types:
-                field_answers[m.group(1)] = m.group(2).strip()
-        if field_answers:
-            return field_answers, {}, confidence, pros, cons
-
-    contribution = " ".join(contribution_lines).strip() or raw_text.strip()
-    return contribution, {}, confidence, pros, cons
+    return " ".join(contribution_lines).strip() or raw_text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +198,7 @@ class Agent:
     config : dict
         Agent config from the UI: name, provider, model, role.
     experiment_config : dict
-        Full experiment config (instructions, questions, overrides).
+        Full experiment config (instructions, overrides, ECU settings).
     """
 
     def __init__(self, config: dict[str, Any], experiment_config: dict[str, Any]):
@@ -277,7 +214,6 @@ class Agent:
         self.role: str = custom_role_text if raw_role == "Custom" and custom_role_text else raw_role
 
         self._instructions = experiment_config.get("instructions", {})
-        self._questions = experiment_config.get("questions", [])
         self._overrides = experiment_config.get("agent_prompt_overrides", {})
         self._ecu_info_condition: str = experiment_config.get("ecu", {}).get("info_condition", "opaque")
         self._ecu_dimensions: list[dict] = experiment_config.get("ecu", {}).get("dimensions", [])
@@ -303,12 +239,11 @@ class Agent:
             base_instructions=self._instructions.get("base_instructions", ""),
             guideline_notes=self._instructions.get("guideline_notes", ""),
             agent_overrides=self._overrides,
-            questions=self._questions,
             ecu_info_condition=self._ecu_info_condition,
             ecu_dimensions=self._ecu_dimensions,
         )
 
-        user_message = _build_user_message(packet, self._questions)
+        user_message = _build_user_message(packet)
         self._last_system_prompt = system_prompt
         self._last_user_message = user_message
 
@@ -332,7 +267,7 @@ class Agent:
         except Exception as exc:
             raw_text = f"[ERROR: {exc}]"
 
-        contribution, _, _, _, _ = _parse_deliberation(raw_text, self._questions)
+        contribution = _parse_contribution(raw_text)
 
         return AgentOutput(
             agent_name=self.name,

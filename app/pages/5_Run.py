@@ -27,6 +27,13 @@ from core.protocols.agent_zero_loop import run_agent_zero_experiment
 _AMS = ZoneInfo("Europe/Amsterdam")
 _ACCENT = "#2E5945"
 
+
+@st.cache_data(show_spinner=False)
+def _cached_brief_pdf(brief_text: str, topic_text: str) -> bytes:
+    """Streamlit reruns this page on every widget interaction — cache the PDF
+    so it's rendered once per brief instead of on every rerun."""
+    return brief_to_pdf_bytes(brief_text, topic_text)
+
 cfg = st.session_state.get("experiment_config")
 
 if not cfg or not cfg.get("task", {}).get("description", "").strip():
@@ -203,7 +210,7 @@ def _show_result(result: dict) -> None:
             use_container_width=True,
         )
     with dl2:
-        pdf_bytes = brief_to_pdf_bytes(result["final_brief"], topic)
+        pdf_bytes = _cached_brief_pdf(result["final_brief"], topic)
         st.download_button(
             "Download brief (.pdf)",
             data=pdf_bytes,

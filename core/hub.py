@@ -43,10 +43,7 @@ class ContextPacket:
     ------
     item_id : str
     item_data : dict
-        The raw input (text, image path / URL, etc.)
-    current_contribution : Any
-        The most recent agreed contribution/labels, regardless of who set it.
-        str for deliberation tasks, dict[field→verdict] for classification.
+        The raw input (the deliberation topic).
     visible_history : list[AgentOutput]
         The slice of the message log this agent is allowed to see.
         Content depends on visibility_mode.
@@ -61,7 +58,6 @@ class ContextPacket:
     """
     item_id: str
     item_data: dict[str, Any]
-    current_contribution: Any
     visible_history: list[AgentOutput]
     cycle: int
     agent_name: str
@@ -124,7 +120,6 @@ class CommunicationHub:
         self._log: list[AgentOutput] = []
         self._peer_review_log: list[PeerReviewOutput] = []
         self._prompt_log: list[dict] = []  # {cycle, agent, phase, prompt, response}
-        self._current_contribution: Any = None
         self.originator_name: str | None = None
         self.originator_contribution: Any = None
         self.converged: bool = False
@@ -180,7 +175,6 @@ class CommunicationHub:
         return ContextPacket(
             item_id=self.item_id,
             item_data=self.item_data,
-            current_contribution=self._current_contribution,
             visible_history=self._build_visible_history(agent_name),
             cycle=cycle,
             agent_name=agent_name,
@@ -190,23 +184,6 @@ class CommunicationHub:
 
     def submit(self, output: AgentOutput) -> None:
         """Accept a Phase 1 AgentOutput and store it."""
-        prev = self._current_contribution
-
-        if isinstance(output.contribution, dict) and isinstance(prev, dict):
-            output.changed = {
-                fname: (output.contribution.get(fname) != prev.get(fname))
-                for fname in output.contribution
-            }
-        elif output.contribution != prev:
-            output.changed = {"__contribution__": True}
-        else:
-            output.changed = {}
-
-        if isinstance(output.contribution, dict) and isinstance(self._current_contribution, dict):
-            self._current_contribution.update(output.contribution)
-        else:
-            self._current_contribution = output.contribution
-
         if not self._log:
             self.originator_name = output.agent_name
             self.originator_contribution = output.contribution
@@ -231,33 +208,27 @@ class CommunicationHub:
 
         round_reviews = [r for r in self._peer_review_log if r.cycle == cycle]
 
-        # Map agent_name → contribution for this cycle
-        contrib_map: dict[str, Any] = {
-            o.agent_name: o.contribution
-            for o in self._log if o.cycle == cycle
+        # Map agent_name → (contribution, AgentOutput) for this cycle
+        outputs_by_agent: dict[str, AgentOutput] = {
+            o.agent_name: o for o in self._log if o.cycle == cycle
         }
 
         earned: dict[str, float] = {}
         for agent_name in self.agent_names:
-            contribution = contrib_map.get(agent_name)
-            ecu = self.ledger.record_from_reviews(
+            out = outputs_by_agent.get(agent_name)
+            record = self.ledger.record_from_reviews(
                 agent_name=agent_name,
                 cycle=cycle,
                 item_id=self.item_id,
-                contribution=contribution,
+                contribution=out.contribution if out else None,
                 reviews=round_reviews,
             )
-            earned[agent_name] = ecu
+            earned[agent_name] = record.ecu_earned
 
             # Attach scores back to the AgentOutput for logging
-            for out in self._log:
-                if out.agent_name == agent_name and out.cycle == cycle:
-                    last_record = self.ledger.history[-len(self.agent_names):]
-                    for rec in last_record:
-                        if rec.agent_name == agent_name and rec.cycle == cycle:
-                            out.ecu_scores = rec.aggregated_scores
-                            out.ecu_earned = rec.ecu_earned
-                            break
+            if out is not None:
+                out.ecu_scores = record.aggregated_scores
+                out.ecu_earned = record.ecu_earned
 
         return earned
 
@@ -285,25 +256,6 @@ class CommunicationHub:
     def log(self) -> list[AgentOutput]:
         """Full message log (read-only view)."""
         return list(self._log)
-
-    @property
-    def current_contribution(self) -> Any:
-        return self._current_contribution
-
-    # Keep current_labels as a convenience alias for classification tasks
-    @property
-    def current_labels(self) -> dict[str, Any]:
-        if isinstance(self._current_contribution, dict):
-            return self._current_contribution
-        return {}
-
-    def set_current_labels(self, labels: dict[str, Any]) -> None:
-        """
-        Override the current contribution state directly.
-        Used by aggregating protocols (e.g. Crowd) to push the round's
-        aggregated result after all individual submissions are collected.
-        """
-        self._current_contribution = labels
 
     @property
     def num_submissions(self) -> int:
@@ -343,7 +295,6 @@ class CommunicationHub:
     def to_dict(self) -> dict:
         d = {
             "item_id": self.item_id,
-            "current_contribution": self._current_contribution,
             "originator_name": self.originator_name,
             "originator_contribution": self.originator_contribution,
             "converged": self.converged,
@@ -366,28 +317,25 @@ class CommunicationHub:
         """
         φ₁ — filter the Phase 1 message log per visibility_mode.
 
-        "Blind"          → empty list (agent writes without seeing anyone)
-        "Previous round" → last submission from each agent (one per agent)
-        "Full history"   → entire log across all rounds
-
-        Legacy values "Current state only", "Summary only", "Previous agent only"
-        are mapped to their equivalents for backwards compatibility.
+        "Blind"               → empty list (agent writes without seeing anyone)
+        "Previous round"      → last submission from each agent (one per agent)
+        "Full history"        → entire log across all rounds
+        "Previous agent only" → only the single most recent submission
+                                (gossip anchoring mode)
         """
         if not self._log:
             return []
 
         mode = self.visibility_mode
 
-        if mode in ("Blind", "Current state only"):
+        if mode == "Blind":
             return []
-        elif mode in ("Previous round", "Summary only"):
-            return list(self._latest_per_agent().values())
         elif mode == "Full history":
             return list(self._log)
         elif mode == "Previous agent only":
-            # Legacy gossip mode — keep for compatibility
             return [self._log[-1]]
 
+        # "Previous round" and any unrecognised value
         return list(self._latest_per_agent().values())
 
     def build_review_history(self, cycle: int) -> dict[str, list[str]]:

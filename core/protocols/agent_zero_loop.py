@@ -463,11 +463,6 @@ def run_agent_zero_experiment(
             ended_reason = "agent_zero_ended"
             break
 
-        if total_spawns >= max_total_spawns and len(hub.agent_names) >= max_agents:
-            # Both hard caps reached — no more roster edits are possible even
-            # if Agent 0 keeps asking; end gracefully rather than spin.
-            pass  # not a stop condition by itself — only max_rounds/end_debate stop the loop
-
     # A brief is produced no matter how the loop stopped — if Agent 0 never
     # issued an end_debate decision (e.g. max_rounds was hit first), ask it
     # for a wrap-up brief explicitly. `ended_reason` still reflects why the
@@ -511,10 +506,9 @@ def run_agent_zero_experiment(
         "final_ecu_balances": hub.ecu_balances,
         "final_ecu_weights": ledger.ecu_weights if ledger else {},
         "debug": {
-            # Untruncated contribution text only — no raw_response/timestamp/
-            # changed-flags, since the exact same raw text already lives in
-            # prompt_log below. Storing it twice was the single biggest
-            # source of bloat in these logs.
+            # Untruncated contribution text only — no raw_response/timestamp,
+            # since the exact same raw text already lives in prompt_log below.
+            # Storing it twice was the single biggest source of bloat in these logs.
             "full_contributions": [
                 {"cycle": o.cycle, "agent_name": o.agent_name, "contribution": o.contribution}
                 for o in hub.log

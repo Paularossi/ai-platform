@@ -29,7 +29,7 @@ from typing import Any
 
 from core.agent import Agent
 from core.hub import CommunicationHub, ContextPacket
-from core.protocols import RunEvent, run_peer_review_for_agent
+from core.protocols import RunEvent, finalize_peer_review_round, run_peer_review_for_agent
 from core.state import AgentOutput
 
 
@@ -69,10 +69,6 @@ class CrowdProtocol:
     def run_iter(self, hub: CommunicationHub) -> Iterator[RunEvent]:
 
         for cycle_idx in range(self.max_cycles):
-
-            # Snapshot the official pre-round state. Counterfactual orchestrator
-            # evaluations clone this snapshot so sandbox outputs never enter the
-            # official dialogue history.
 
             # ── Phase 1: simultaneous blind contributions ─────────────────
             # Build all packets from a pre-round snapshot so no agent sees
@@ -127,10 +123,7 @@ class CrowdProtocol:
     ) -> Iterator[RunEvent]:
 
         all_contributions = {o.agent_name: o.contribution for o in round_outputs}
-        item_context = ", ".join(
-            f"{k}: {v}" for k, v in hub.item_data.items()
-
-        )
+        item_context = ", ".join(f"{k}: {v}" for k, v in hub.item_data.items())
         # Collect importance votes when orchestrator is enabled
         collect_votes = self.orchestrator is not None and self.orchestrator.enabled
 
@@ -150,28 +143,11 @@ class CrowdProtocol:
                 packet=ref_packet,
             )
 
-        round_reviews = [r for r in hub.peer_review_log if r.cycle == cycle_idx]
-        if self.coalition_tracker:
-            self.coalition_tracker.find_coalition(round_reviews)
-
+        finalize_peer_review_round(
+            hub, cycle_idx, self.coalition_tracker, self.orchestrator,
+            is_final_cycle=cycle_idx >= self.max_cycles - 1,
+        )
         if hub.ledger:
-            hub.compute_ecus_for_round(cycle_idx)
-            hub.ledger.record_social_welfare(cycle_idx, round_reviews)
-
-            if self.orchestrator and self.orchestrator.should_update(
-                cycle_idx, is_final_cycle=cycle_idx >= self.max_cycles - 1
-            ):
-                importance_votes = {
-                    r.reviewer_name: r.importance_votes
-                    for r in round_reviews
-                    if r.importance_votes
-                }
-                self.orchestrator.update(
-                    cycle=cycle_idx,
-                    ledger=hub.ledger,
-                    importance_votes=importance_votes,
-                )
-
             yield RunEvent(
                 kind="ecu_update",
                 cycle=cycle_idx,

@@ -59,10 +59,10 @@ AGENTS_CFG = [
 
 EXPERIMENT_CFG = {
     "protocol": {
-        "setting": "Crowd (parallel)",
+        "setting": "Simultaneous",
         "max_cycles": 2,
         "stopping_rule": "Max cycles",
-        "visibility_mode": "Summary only",
+        "visibility_mode": "Previous round",
     },
     "instructions": {
         "base_instructions": (
@@ -71,7 +71,6 @@ EXPERIMENT_CFG = {
         ),
         "guideline_notes": "",
     },
-    "questions": [],
     "agent_prompt_overrides": {},
 }
 
@@ -85,7 +84,7 @@ def build_run(max_cycles=2, include_self=False, threshold=0.6, info_cond="opaque
     weights = {d["name"]: 1.0 for d in DEFAULT_DIMENSIONS}
 
     peer_reviewer = PeerReviewRound(dry_run=True, include_self_assessment=include_self)
-    ledger = EcuLedger(agent_names, weights=weights, include_self_assessment=include_self)
+    ledger = EcuLedger(agent_names, ecu_weights=weights, include_self_assessment=include_self)
     coalition = CoalitionTracker(threshold=threshold)
 
     cfg = dict(EXPERIMENT_CFG)
@@ -95,7 +94,7 @@ def build_run(max_cycles=2, include_self=False, threshold=0.6, info_cond="opaque
     hub = CommunicationHub(
         item_id="q1",
         item_data=ITEM,
-        visibility_mode="Summary only",
+        visibility_mode="Previous round",
         agent_names=agent_names,
         ledger=ledger,
         ecu_info_condition=info_cond,
@@ -310,7 +309,6 @@ def test_prompt_construction() -> None:
         "You are a policy advisor.",
         "",
         {},
-        [],
     )
     check("System prompt contains agent name", "Economist" in system)
     check("System prompt contains custom role description", "welfare economics" in system)
@@ -319,12 +317,11 @@ def test_prompt_construction() -> None:
     packet0 = ContextPacket(
         item_id="q1",
         item_data=ITEM,
-        current_contribution=None,
         visible_history=[],
         cycle=0,
         agent_name="Economist",
     )
-    msg0 = _build_user_message(packet0, [])
+    msg0 = _build_user_message(packet0)
     check("Round-0 user message contains item data", "congestion charges" in msg0)
     check("Round-0 user message has no history", "Previous round" not in msg0)
 
@@ -339,12 +336,11 @@ def test_prompt_construction() -> None:
     packet1 = ContextPacket(
         item_id="q1",
         item_data=ITEM,
-        current_contribution="Spatial displacement matters.",
         visible_history=[prev],
         cycle=1,
         agent_name="Economist",
     )
-    msg1 = _build_user_message(packet1, [])
+    msg1 = _build_user_message(packet1)
     check("Round-1 message has previous round section", "Previous round" in msg1)
     check("Round-1 message shows peer contributions", "Urban Planner" in msg1)
     check("Round-1 message shows peer review scores", "Peer review scores" in msg1)

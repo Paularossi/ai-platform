@@ -30,8 +30,6 @@ class AgentOutput:
         0-indexed round number.
     contribution : str
         The agent's free-text contribution for this round.
-    changed : dict[str, bool]
-        Change flags vs previous state (set by hub).
     ecu_scores : dict[str, float]
         Quality scores received from peer review (set after Phase 2).
     ecu_earned : float | None
@@ -42,7 +40,6 @@ class AgentOutput:
     agent_name: str
     cycle: int
     contribution: Any = None
-    changed: dict[str, bool] = field(default_factory=dict)
     ecu_scores: dict[str, float] = field(default_factory=dict)
     ecu_earned: float | None = None
     raw_response: str | None = None
@@ -53,7 +50,6 @@ class AgentOutput:
             "agent_name": self.agent_name,
             "cycle": self.cycle,
             "contribution": self.contribution,
-            "changed": self.changed,
             "ecu_scores": self.ecu_scores,
             "ecu_earned": self.ecu_earned,
             "raw_response": self.raw_response,

@@ -32,7 +32,7 @@ Components
 
   EcuLedger
   ---------
-  Unchanged — accumulates per-agent ecu balances and records history.
+  Accumulates per-agent ecu balances and records history.
 """
 
 from __future__ import annotations
@@ -117,15 +117,11 @@ class PeerReviewRound:
         include_self_assessment: bool = False,
         review_depth: str = "Previous Round",
         dry_run: bool = False,
-        reviewer_provider: str = "OpenAI",
-        reviewer_model: str = "gpt-4o",
     ):
         self.dimensions = dimensions or DEFAULT_DIMENSIONS
         self.include_self_assessment = include_self_assessment
         self.review_depth = review_depth
         self.dry_run = dry_run
-        self.reviewer_provider = reviewer_provider
-        self.reviewer_model = reviewer_model
 
     def build_prompt(
         self,
@@ -368,38 +364,6 @@ class PeerReviewRound:
             raw_response=raw,
         )
 
-    # Keep run() as a convenience wrapper that makes the LLM call directly
-    # — used when no Agent object is available (e.g. standalone testing).
-    # In the main protocol flow, the protocol calls agent.call() instead.
-    def run(
-        self,
-        reviewer_name: str,
-        reviewer_contribution: Any,
-        all_contributions: dict[str, Any],
-        cycle: int,
-        item_context: str = "",
-        ecu_info: str = "",
-    ) -> PeerReviewOutput:
-
-        prompt = self.build_prompt(
-            reviewer_name, reviewer_contribution, all_contributions,
-            cycle, item_context, ecu_info,
-        )
-        try:
-            from core.providers import get_provider
-            pr_kwargs = {"json_mode": True} if self.reviewer_provider == "Google" else {}
-            raw = get_provider(self.reviewer_provider).complete(
-                model=self.reviewer_model,
-                system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
-                user_message=prompt,
-                max_tokens=800,
-                **pr_kwargs,
-            )
-        except Exception as exc:
-            raw = f"[ERROR: {exc}]"
-
-        return self.parse(reviewer_name, cycle, raw, all_contributions)
-
 
 # ---------------------------------------------------------------------------
 # CoalitionTracker
@@ -439,15 +403,13 @@ class CoalitionTracker:
 
         best: list[str] = []
 
-        # Enumerate all subsets of size ≥ 2 (a coalition requires mutual agreement
-        # between at least two agents; single-agent subsets are meaningless)
+        # Enumerate subsets of size ≥ 2, largest first (a coalition requires mutual agreement between at least two agents). 
+        # The first coalition found is maximal, so stop at the first hit.
         for size in range(n, 1, -1):
-            if size <= len(best):
-                break
-            for subset in _subsets(agents, size):
+            for subset in combinations(agents, size):
                 if self._is_coalition(subset, agree):
-                    if len(subset) > len(best):
-                        best = list(subset)
+                    best = list(subset)
+                    break
             if best:
                 break
 
@@ -464,7 +426,7 @@ class CoalitionTracker:
         return best
 
     def _is_coalition(
-        self, subset: list[str], agree: dict[str, dict[str, float]]
+        self, subset: tuple[str, ...], agree: dict[str, dict[str, float]]
     ) -> bool:
         for i in subset:
             for j in subset:
@@ -487,28 +449,26 @@ class CoalitionTracker:
         }
 
 
-def _subsets(items: list, size: int):
-    """Yield all subsets of `items` of given size."""
-    yield from combinations(items, size)
-
-
 # ---------------------------------------------------------------------------
-# EcuLedger (unchanged interface, updated formula)
+# EcuLedger
 # ---------------------------------------------------------------------------
 
 @dataclass
 class TurnRecord:
-    """ECU record for one agent in one round."""
+    """
+    ECU record for one agent in one round.
+
+    Round-level social welfare is not duplicated here — it lives once per
+    round in EcuLedger.social_welfare_history (see record_social_welfare).
+    """
     agent_name: str
     cycle: int
     item_id: str
     peer_scores: dict[str, dict[str, float]]  # {reviewer: {dim: score}}
     self_scores: dict[str, float] | None
     aggregated_scores: dict[str, float]        # mean per dimension
-    weights: dict[str, float]                  # legacy alias: ECU weights
     ecu_weights: dict[str, float]
     sw_weights: dict[str, float]
-    social_welfare: float | None
     ecu_earned: float
     contribution_preview: str
 
@@ -520,10 +480,8 @@ class TurnRecord:
             "peer_scores": self.peer_scores,
             "self_scores": self.self_scores,
             "aggregated_scores": {k: round(v, 4) for k, v in self.aggregated_scores.items()},
-            "weights": self.weights,
             "ecu_weights": self.ecu_weights,
             "sw_weights": self.sw_weights,
-            "social_welfare": None if self.social_welfare is None else round(self.social_welfare, 4),
             "ecu_earned": round(self.ecu_earned, 4),
             "contribution_preview": self.contribution_preview,
         }
@@ -537,8 +495,6 @@ class EcuLedger:
     ----------
     agent_names : list[str]
     dimensions : list[dict]
-    weights : dict[str, float]
-        Backward-compatible alias for initial ECU weight vector w^ECU.
     ecu_weights : dict[str, float]
         Variable Orchestrator incentive weights w^ECU used for ECU payouts.
     sw_weights : dict[str, float]
@@ -553,7 +509,6 @@ class EcuLedger:
         self,
         agent_names: list[str],
         dimensions: list[dict] | None = None,
-        weights: dict[str, float] | None = None,
         ecu_weights: dict[str, float] | None = None,
         sw_weights: dict[str, float] | None = None,
         include_self_assessment: bool = False,
@@ -566,10 +521,8 @@ class EcuLedger:
 
         default_weights = {d["name"]: 1.0 for d in self.dimensions}
 
-        # w^ECU: variable incentive weights. `weights` is kept as a legacy alias.
+        # w^ECU: variable incentive weights.
         self.ecu_weights: dict[str, float] = dict(default_weights)
-        if weights:
-            self.ecu_weights.update(weights)
         if ecu_weights:
             self.ecu_weights.update(ecu_weights)
 
@@ -591,9 +544,10 @@ class EcuLedger:
         item_id: str,
         contribution: Any,
         reviews: list[PeerReviewOutput],
-    ) -> float:
+    ) -> TurnRecord:
         """
-        Compute and record ecu for agent_name from a round's peer review outputs.
+        Compute and record ecu for agent_name from a round's peer review
+        outputs. Returns the appended TurnRecord.
 
         Implements the ECU formula:
             ecu_i = sum_q w_q^ECU * mean_peer_score_q(i)
@@ -634,8 +588,6 @@ class EcuLedger:
         # ECU_i^(t) = Σ_q w_q^ECU · (1/(n-1))Σ_{j≠i}s_ji^(t)(q)
         ecu = sum(agg.get(d, 0.0) * self.ecu_weights.get(d, 1.0) for d in self.dim_names)
 
-        sw = self.compute_social_welfare(reviews)
-
         self._balances[agent_name] = self._balances.get(agent_name, 0.0) + ecu
 
         contrib_str = (
@@ -643,22 +595,20 @@ class EcuLedger:
             else json.dumps(contribution, ensure_ascii=False)
         )
 
-        self._history.append(TurnRecord(
+        record = TurnRecord(
             agent_name=agent_name,
             cycle=cycle,
             item_id=item_id,
             peer_scores=peer_scores,
             self_scores=self_scores,
             aggregated_scores=agg,
-            weights=dict(self.ecu_weights),
             ecu_weights=dict(self.ecu_weights),
             sw_weights=dict(self.sw_weights),
-            social_welfare=sw,
             ecu_earned=ecu,
             contribution_preview=contrib_str[:120],
-        ))
-
-        return ecu
+        )
+        self._history.append(record)
+        return record
 
     def add_agent(self, name: str) -> None:
         """
@@ -691,22 +641,9 @@ class EcuLedger:
             }
         return self._noisy_weight_cache[cycle]
 
-    @property
-    def weights(self) -> dict[str, float]:
-        """Backward-compatible alias for variable ECU weights w^ECU."""
-        return self.ecu_weights
-
-    def update_weights(self, new_weights: dict[str, float]) -> None:
+    def update_ecu_weights(self, new_weights: dict[str, float]) -> None:
         """Update variable ECU incentive weights w^ECU."""
         self.ecu_weights.update(new_weights)
-
-    def update_ecu_weights(self, new_weights: dict[str, float]) -> None:
-        """Explicit alias for updating w^ECU."""
-        self.update_weights(new_weights)
-
-    def update_sw_weights(self, new_weights: dict[str, float]) -> None:
-        """Update fixed SW valuation weights manually; the Orchestrator should not call this."""
-        self.sw_weights.update(new_weights)
 
     def mean_peer_scores(self, reviews: list[PeerReviewOutput]) -> dict[str, float]:
         """
@@ -753,45 +690,12 @@ class EcuLedger:
         """Return the cumulative ECU balance for one agent."""
         return self._balances.get(agent_name, 0.0)
 
-    def last_round_ecu_for(self, agent_name: str) -> float:
-        """
-        Return the ECU earned by an agent in the most recent round.
-
-        Used as a reputation signal: reflects current performance rather than
-        cumulative history, so reputation can rise and fall across rounds.
-        Returns 0.0 if the agent has no recorded history.
-        """
-        agent_records = [r for r in reversed(self._history) if r.agent_name == agent_name]
-        if not agent_records:
-            return 0.0
-        latest_cycle = agent_records[0].cycle
-        cycle_records = [r for r in agent_records if r.cycle == latest_cycle]
-        return sum(r.ecu_earned for r in cycle_records)
-
-    def reputation_scores(self) -> dict[str, float]:
-        """
-        Return {agent_name: last_round_ecu} for all agents.
-
-        Convenience method for passing reputation context into prompts or
-        weighting peer review scores.
-        """
-        return {name: self.last_round_ecu_for(name) for name in self._balances}
-
     @property
     def social_welfare_history(self) -> list[dict[str, Any]]:
         return list(self._social_welfare_history)
 
-    def scores_by_dimension(self) -> dict[str, list[float]]:
-        result: dict[str, list[float]] = {d: [] for d in self.dim_names}
-        for rec in self._history:
-            for dim, score in rec.aggregated_scores.items():
-                if dim in result:
-                    result[dim].append(score)
-        return result
-
     def to_dict(self) -> dict:
         return {
-            "weights": self.ecu_weights,
             "ecu_weights": self.ecu_weights,
             "sw_weights": self.sw_weights,
             "balances": {k: round(v, 4) for k, v in self._balances.items()},
