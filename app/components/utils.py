@@ -15,13 +15,11 @@ def restore_draft(loaded: dict) -> None:
     stale_keys = [
         "task_description", "base_instructions", "guideline_notes",
         "agent_prompt_overrides", "agents", "num_agents",
-        "interaction_setting", "supervision_mode", "visibility_mode",
-        "review_depth", "order_type", "max_cycles", "stopping_rule",
-        "initializer_agent", "judge_agent",
-        "ecu_enabled", "ecu_info_condition", "ecu_self_assessment",
-        "ecu_coalition_threshold", "ecu_dimensions",
-        "ecu_orchestrator_enabled", "ecu_orchestrator_step_size",
-        "ecu_orchestrator_every",
+        "interaction_setting", "run_mode", "visibility_mode",
+        "review_depth", "order_type", "custom_order", "max_cycles", "stopping_rule",
+        "initializer_agent", "ecu_enabled", "ecu_info_condition", "ecu_self_assessment",
+        "ecu_coalition_threshold", "ecu_dimensions", "ecu_orchestrator_enabled",
+        "ecu_orchestrator_step_size", "ecu_orchestrator_every",
     ]
     for key in stale_keys:
         st.session_state.pop(key, None)
@@ -33,7 +31,6 @@ def restore_draft(loaded: dict) -> None:
     ov = loaded.get("overview", {})
     st.session_state.exp_name = ov.get("name", "")
     st.session_state.author = ov.get("author", "")
-    st.session_state.protocol_id = ov.get("protocol_id", "")
 
     task = loaded.get("task", {})
     st.session_state.task_description = task.get("description", "")
@@ -51,14 +48,14 @@ def restore_draft(loaded: dict) -> None:
 
     proto = loaded.get("protocol", {})
     st.session_state.interaction_setting = proto.get("setting", "Simultaneous")
-    st.session_state.supervision_mode = proto.get("supervision_mode", "Unsupervised")
+    st.session_state.run_mode = proto.get("run_mode", "Automatic")
     st.session_state.visibility_mode = proto.get("visibility_mode", "Previous round")
     st.session_state.review_depth = proto.get("review_depth", "Previous Round")
     st.session_state.order_type = proto.get("order_type", "Fixed")
+    st.session_state.custom_order = proto.get("custom_order", [])
     st.session_state.max_cycles = proto.get("max_cycles", 5)
     st.session_state.stopping_rule = proto.get("stopping_rule", "Either")
     st.session_state.initializer_agent = proto.get("initializer_agent", "")
-    st.session_state.judge_agent = proto.get("judge_agent", "")
 
     ecu = loaded.get("ecu", {})
     st.session_state.ecu_enabled = ecu.get("enabled", True)

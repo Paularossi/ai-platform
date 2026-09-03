@@ -29,16 +29,11 @@ while keeping the ECU budget stable across rounds.
 The 1/t learning rate satisfies the Robbins-Monro conditions (sum 1/t = inf,
 sum 1/t^2 < inf), guaranteeing convergence as t -> inf. For finite T the schedule
 gives larger updates early and diminishing updates later, without unbounded growth.
-
-Advantages over sandbox coordinate search (orchestrator_sandbox.py):
-  - Zero additional LLM calls (votes collected in regular Phase 2)
-  - Participatory: agents determine the update direction from their perspective
-  - No counterfactual re-runs required
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:

@@ -1,85 +1,87 @@
 {
   "meta": {
-    "saved_at": "2026-06-27T17:43:23.590988+02:00",
+    "saved_at": "2026-09-03T18:00:47.856539+02:00",
     "app_version": "0.1"
   },
   "overview": {
-    "name": "chess",
-    "author": "Paula",
-    "protocol_id": "1"
+    "name": "test",
+    "author": "Paula"
   },
   "task": {
-    "description": "Who is the greatest chess player of all times?"
+    "description": "Who is the greatest chess player?"
   },
   "instructions": {
-    "base_instructions": "You are a chess enthusiast participating in a structured deliberation. Write exactly one paragraph (50-150 words) arguing from your assigned perspective. Be open to others' opinions.",
+    "base_instructions": "You are a chess enthusiast. Write a few sentences arguing your stand point. Then conclude with your final response: RESPONSE = <your verdict>.",
     "guideline_notes": ""
   },
   "agent_prompt_overrides": {
-    "Male fan": "",
-    "Female fan": ""
+    "Agent 1": "",
+    "Agent 2": ""
   },
   "agents": [
     {
-      "name": "Male fan",
+      "name": "Agent 1",
       "provider": "OpenAI",
       "model": "gpt-4o",
       "temperature": 0.1,
       "role": "Custom",
-      "custom_role": "You believe chess is a male-dominated sport, but you are willing to argue."
+      "custom_role": "You were born in the 60s."
     },
     {
-      "name": "Female fan",
+      "name": "Agent 2",
       "provider": "Anthropic",
       "model": "claude-sonnet-4-6",
-      "temperature": 0.05,
+      "temperature": 0.1,
       "role": "Custom",
-      "custom_role": "You believe since chess is not a physical sport, there shouldn't be a distinction between males and females in chess, but you are willing to argue."
+      "custom_role": "You were born in 2000."
     }
   ],
   "protocol": {
-    "setting": "Simultaneous",
-    "supervision_mode": "Unsupervised",
+    "setting": "Sequential",
+    "run_mode": "Manual (step-through)",
     "visibility_mode": "Previous round",
     "review_depth": "Previous Round",
     "order_type": "Fixed",
-    "initializer_agent": "Agent 1",
-    "judge_agent": "Agent 3",
+    "custom_order": [
+      "Agent 1",
+      "Agent 2"
+    ],
+    "initializer_agent": "Agent 2",
     "max_cycles": 5,
     "stopping_rule": "Either"
   },
   "ecu": {
-    "enabled": true,
-    "info_condition": "transparent",
+    "enabled": false,
+    "info_condition": "opaque",
     "include_self_assessment": false,
-    "coalition_threshold": 0.7,
-    "orchestrator_enabled": true,
+    "coalition_threshold": 0.6,
+    "orchestrator_enabled": false,
     "orchestrator_step_size": 0.1,
-    "orchestrator_every": 1,
+    "orchestrator_every": 2,
     "dimensions": [
       {
         "name": "depth_breadth",
         "label": "Depth-Breadth",
         "weight": 1.0,
-        "sw_weight": 0.8
+        "sw_weight": 1.0
       },
       {
         "name": "depth",
         "label": "Depth",
         "weight": 1.0,
-        "sw_weight": 0.8
+        "sw_weight": 1.0
       },
       {
         "name": "clarity",
         "label": "Clarity",
         "weight": 1.0,
-        "sw_weight": 0.8
+        "sw_weight": 1.0
       },
       {
         "name": "consensus",
         "label": "Consensus",
         "weight": 1.0,
-        "sw_weight": 1.2
+        "sw_weight": 1.0
       }
     ]
   },

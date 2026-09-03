@@ -14,12 +14,12 @@ def init_agent_config():
     if "protocol" not in st.session_state.experiment_config:
         st.session_state.experiment_config["protocol"] = {
             "setting": "Simultaneous",
-            "supervision_mode": "Unsupervised",
+            "run_mode": "Automatic",
             "visibility_mode": "Previous round",
             "review_depth": "Previous Round",
             "order_type": "Fixed",
+            "custom_order": [],
             "initializer_agent": "Agent 1",
-            "judge_agent": "Agent 3",
             "max_cycles": 5,
             "stopping_rule": "Either",
         }
@@ -35,12 +35,12 @@ def sync_agents_to_config():
 
     st.session_state.experiment_config["protocol"] = {
         "setting": st.session_state.interaction_setting,
-        "supervision_mode": st.session_state.supervision_mode,
+        "run_mode": st.session_state.run_mode,
         "visibility_mode": st.session_state.visibility_mode,
         "review_depth": st.session_state.get("review_depth", "Previous Round"),
         "order_type": st.session_state.order_type,
+        "custom_order": st.session_state.get("custom_order", []),
         "initializer_agent": st.session_state.initializer_agent,
-        "judge_agent": st.session_state.judge_agent,
         "max_cycles": st.session_state.max_cycles,
         "stopping_rule": st.session_state.stopping_rule,
     }
@@ -87,8 +87,8 @@ def init_agent_state():
     if "interaction_setting" not in st.session_state:
         st.session_state.interaction_setting = protocol.get("setting", "Simultaneous")
 
-    if "supervision_mode" not in st.session_state:
-        st.session_state.supervision_mode = protocol.get("supervision_mode", "Unsupervised")
+    if "run_mode" not in st.session_state:
+        st.session_state.run_mode = protocol.get("run_mode", "Automatic")
 
     if "visibility_mode" not in st.session_state:
         st.session_state.visibility_mode = protocol.get("visibility_mode", "Previous round")
@@ -99,6 +99,9 @@ def init_agent_state():
     if "order_type" not in st.session_state:
         st.session_state.order_type = protocol.get("order_type", "Fixed")
 
+    if "custom_order" not in st.session_state:
+        st.session_state.custom_order = protocol.get("custom_order", [])
+
     if "initializer_agent" not in st.session_state:
         st.session_state.initializer_agent = protocol.get("initializer_agent", "Agent 1")
 
@@ -107,9 +110,6 @@ def init_agent_state():
 
     if "stopping_rule" not in st.session_state:
         st.session_state.stopping_rule = protocol.get("stopping_rule", "Either")
-
-    if "judge_agent" not in st.session_state:
-        st.session_state.judge_agent = protocol.get("judge_agent", "Agent 3")
 
 
 def sync_agents_to_count(n: int):
@@ -159,16 +159,22 @@ with main_col:
         with c1:
             st.session_state.interaction_setting = st.selectbox(
                 "Interaction setting",
-                ["Simultaneous", "Sequential", "Duel (debate)", "Court (judge-based)"],
-                index=["Simultaneous", "Sequential", "Duel (debate)", "Court (judge-based)"].index(
+                ["Simultaneous", "Sequential"],
+                index=["Simultaneous", "Sequential"].index(
                     st.session_state.interaction_setting
-                ),
+                ) if st.session_state.interaction_setting in ["Simultaneous", "Sequential"] else 0,
             )
         with c2:
-            st.session_state.supervision_mode = st.selectbox(
-                "Supervision mode",
-                ["Unsupervised", "Supervised"],
-                index=["Unsupervised", "Supervised"].index(st.session_state.supervision_mode),
+            st.session_state.run_mode = st.selectbox(
+                "Run mode",
+                ["Automatic", "Manual (step-through)"],
+                index=["Automatic", "Manual (step-through)"].index(st.session_state.run_mode),
+                help=(
+                    "Automatic plays the debate straight through using the stopping "
+                    "rule below. Manual pauses before every agent turn so you can "
+                    "review and edit the prompt, then approve it to send — you decide "
+                    "when the debate ends."
+                ),
             )
 
     with st.container(border=True):
@@ -300,53 +306,74 @@ with main_col:
 
 
 
-        with c2:
-            order_options = ["Fixed", "Randomized each cycle"]
-            st.session_state.order_type = st.selectbox(
-                "Execution order",
-                order_options,
-                index=order_options.index(st.session_state.order_type),
-            )
-
         agent_names = [agent["name"] for agent in st.session_state.agents]
 
-        if st.session_state.interaction_setting in ["Sequential", "Duel (debate)", "Court (judge-based)"]:
-            st.session_state.initializer_agent = st.selectbox(
-                "Initializer / first agent",
-                agent_names,
-                index=agent_names.index(st.session_state.initializer_agent)
-                if st.session_state.initializer_agent in agent_names
-                else 0,
-            )
+        if st.session_state.interaction_setting == "Sequential":
+            with c2:
+                order_options = ["Fixed", "Randomized each cycle", "Custom order"]
+                st.session_state.order_type = st.selectbox(
+                    "Execution order",
+                    order_options,
+                    index=order_options.index(st.session_state.order_type)
+                    if st.session_state.order_type in order_options else 0,
+                )
 
-        if st.session_state.interaction_setting == "Court (judge-based)":
-            st.session_state.judge_agent = st.selectbox(
-                "Judge agent",
-                agent_names,
-                index=agent_names.index(st.session_state.judge_agent)
-                if st.session_state.judge_agent in agent_names
-                else min(2, len(agent_names) - 1),
-            )
+            if st.session_state.order_type == "Custom order":
+                st.caption(
+                    "Set each agent's position in the speaking order (1 = goes first). "
+                    "Ties are broken by the order agents are listed above."
+                )
+                current_order = [n for n in st.session_state.get("custom_order", []) if n in agent_names]
+                current_order += [n for n in agent_names if n not in current_order]
+                ranks: dict[str, int] = {}
+                rank_cols = st.columns(min(len(agent_names), 4) or 1)
+                for i, name in enumerate(agent_names):
+                    with rank_cols[i % len(rank_cols)]:
+                        ranks[name] = st.number_input(
+                            name,
+                            min_value=1,
+                            max_value=len(agent_names),
+                            value=current_order.index(name) + 1,
+                            step=1,
+                            key=f"custom_order_rank_{name}",
+                        )
+                st.session_state.custom_order = sorted(agent_names, key=lambda n: (ranks[n], agent_names.index(n)))
+                st.caption("Order: " + " → ".join(st.session_state.custom_order))
+            else:
+                st.session_state.initializer_agent = st.selectbox(
+                    "Initializer / first agent",
+                    agent_names,
+                    index=agent_names.index(st.session_state.initializer_agent)
+                    if st.session_state.initializer_agent in agent_names
+                    else 0,
+                )
 
     with st.container(border=True):
         st.subheader("4. Stopping rules")
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.session_state.max_cycles = st.number_input(
-                "Max cycles / rounds",
-                min_value=1,
-                max_value=50,
-                value=st.session_state.max_cycles,
-                step=1,
+        if st.session_state.run_mode == "Manual (step-through)":
+            st.caption(
+                "In Manual (step-through) mode you decide when the debate ends — "
+                "click 'Stop here' during the run. There's no round limit or "
+                "stopping rule to set here."
             )
-        with c2:
-            stopping_options = ["Convergence", "Max cycles", "Either"]
-            st.session_state.stopping_rule = st.selectbox(
-                "Stopping rule",
-                stopping_options,
-                index=stopping_options.index(st.session_state.stopping_rule),
-            )
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                st.session_state.max_cycles = st.number_input(
+                    "Max cycles / rounds",
+                    min_value=1,
+                    max_value=50,
+                    value=st.session_state.max_cycles,
+                    step=1,
+                )
+            with c2:
+                stopping_options = ["Convergence", "Max cycles", "Either"]
+                st.session_state.stopping_rule = st.selectbox(
+                    "Stopping rule",
+                    stopping_options,
+                    index=stopping_options.index(st.session_state.stopping_rule),
+                )
 
     with st.container(border=True):
         st.subheader("5. ECU quality dimensions")
@@ -444,8 +471,7 @@ with main_col:
                 help=(
                     "Each round, agents vote on which quality dimensions matter most "
                     "(given the topic and their role). Their votes guide gradient-ascent "
-                    "updates to the ECU weights w^ECU. Uses a 1/t learning rate — "
-                    "larger updates early, diminishing over time."
+                    "updates to the ECU weights w^ECU. Uses a 1/t learning rate — larger updates early, diminishing over time."
                 ),
             )
             if st.session_state.ecu_orchestrator_enabled:
@@ -502,7 +528,7 @@ with main_col:
     nav1, nav2, nav3 = st.columns([2, 2, 2])
     with nav1:
         if st.button("← Back"):
-            st.switch_page("Main.py")
+            st.switch_page("pages/1_Welcome.py")
     with nav2:
         if st.button("Save draft", use_container_width=True):
             sync_agents_to_config()
@@ -517,18 +543,20 @@ with summary_col:
     with st.container(border=True):
         st.subheader("Live summary")
         st.markdown(f"**Setting**  \n{st.session_state.interaction_setting}")
-        st.markdown(f"**Supervision**  \n{st.session_state.supervision_mode}")
+        st.markdown(f"**Run mode**  \n{st.session_state.run_mode}")
         st.markdown(f"**φ₁ Visibility**  \n{st.session_state.visibility_mode}")
         st.markdown(f"**φ₂ Review depth**  \n{st.session_state.get('review_depth', 'previous_round')}")
-        st.markdown(f"**Order**  \n{st.session_state.order_type}")
-        st.markdown(f"**Max cycles**  \n{st.session_state.max_cycles}")
-        st.markdown(f"**Stopping rule**  \n{st.session_state.stopping_rule}")
-
-        if st.session_state.interaction_setting in ["Sequential", "Duel (debate)", "Court (judge-based)"]:
-            st.markdown(f"**Initializer**  \n{st.session_state.initializer_agent}")
-
-        if st.session_state.interaction_setting == "Court (judge-based)":
-            st.markdown(f"**Judge**  \n{st.session_state.judge_agent}")
+        if st.session_state.interaction_setting == "Sequential":
+            st.markdown(f"**Order**  \n{st.session_state.order_type}")
+            if st.session_state.order_type == "Custom order":
+                st.markdown(f"**Custom order**  \n{' → '.join(st.session_state.get('custom_order', [])) or '—'}")
+            else:
+                st.markdown(f"**Initializer**  \n{st.session_state.initializer_agent}")
+        if st.session_state.run_mode == "Manual (step-through)":
+            st.markdown("**Stopping**  \nYou decide (Manual mode)")
+        else:
+            st.markdown(f"**Max cycles**  \n{st.session_state.max_cycles}")
+            st.markdown(f"**Stopping rule**  \n{st.session_state.stopping_rule}")
 
         st.divider()
         st.markdown("**Agents**")

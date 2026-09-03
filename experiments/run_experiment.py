@@ -5,8 +5,7 @@ Generic batch runner — loads an experiment JSON file and runs every scenario.
 
 Usage
 -----
-    python experiments/run_experiment.py experiments/chess_test.json
-    python experiments/run_experiment.py experiments/chess_test.json --dry-run
+    python experiments/run_experiment.py experiments/test_thinking.json
 
 Results land in experiments/results/<scenario_name>_<timestamp>.json
 A summary CSV is written to experiments/results/summary_<timestamp>.csv
@@ -41,7 +40,6 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -143,7 +141,7 @@ def run_scenario(base: dict, scenario: dict, dry_run: bool = False) -> dict:
         elif event.kind == "submission":
             print(" done", flush=True)
         elif event.kind == "peer_review":
-            print(f"    peer review ...", flush=True)
+            print("    peer review ...", flush=True)
 
     result = collect_result(hub, ledger, coalition, orchestrator)
     result["scenario"] = scenario["name"]

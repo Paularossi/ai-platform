@@ -14,6 +14,7 @@ everything needed to build a runnable experiment item:
     build_item_data       → dict  (from a DataFrame row + column mapping)
     collect_result        → dict  (serialisable result from a completed hub)
     results_to_df         → pd.DataFrame  (flatten a list of result dicts)
+    build_transcript_md   → str  (a readable, student-facing markdown transcript)
 """
 
 from __future__ import annotations
@@ -162,7 +163,7 @@ def collect_result(
 ) -> dict:
     """
     Serialise the completed hub + ECU objects into a result dict.
-    Safe to call after protocol.run() or after the streaming loop finishes.
+    Safe to call once protocol.run_iter(hub) has been fully drained.
     """
     return {
         "item_id": hub.item_id,
@@ -240,3 +241,91 @@ def results_to_df(results: list[dict]) -> pd.DataFrame:
 
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Readable transcript export
+# ---------------------------------------------------------------------------
+
+def build_transcript_md(result: dict, cfg: dict) -> str:
+    """
+    Render a single run's result dict as a readable markdown transcript —
+    topic, each round's contributions, peer review (if it ran), and the
+    recorded outcome — meant for students to read or hand in, as opposed
+    to the full JSON log which is meant for inspection/debugging.
+    """
+    lines: list[str] = []
+
+    exp_name = cfg.get("overview", {}).get("name") or "Deliberation"
+    topic = cfg.get("task", {}).get("description", "").strip()
+    proto = cfg.get("protocol", {})
+    agents_cfg = cfg.get("agents", [])
+
+    lines.append(f"# {exp_name} — Transcript")
+    lines.append("")
+    if topic:
+        lines.append(f"**Topic:** {topic}")
+    lines.append(
+        f"**Setting:** {proto.get('setting', '-')}  ·  "
+        f"**Agents:** {len(agents_cfg)}  ·  "
+        f"**Turns:** {result.get('num_turns', '-')}"
+    )
+    lines.append("")
+
+    log = result.get("log", [])
+    pr_log = result.get("peer_review_log", [])
+    cycles = sorted({o["cycle"] for o in log})
+
+    for cycle in cycles:
+        lines.append(f"## Round {cycle + 1}")
+        lines.append("")
+        for out in [o for o in log if o["cycle"] == cycle]:
+            contrib = out.get("contribution") or "*(empty)*"
+            lines.append(f"**{out['agent_name']}:**")
+            lines.append("")
+            lines.append(str(contrib))
+            lines.append("")
+
+        round_reviews = [p for p in pr_log if p["cycle"] == cycle]
+        if round_reviews:
+            lines.append("**Peer review:**")
+            lines.append("")
+            for review in round_reviews:
+                for reviewed, dim_scores in review.get("scores", {}).items():
+                    scores_str = ", ".join(f"{d}: {round(s, 2)}" for d, s in dim_scores.items())
+                    justification = review.get("justifications", {}).get(reviewed, "")
+                    lines.append(f"- *{review['reviewer_name']} → {reviewed}* — {scores_str}")
+                    if justification:
+                        lines.append(f"  \"{justification}\"")
+            lines.append("")
+
+    balances = result.get("ecu_balances")
+    if balances:
+        lines.append("## ECU balances (final)")
+        lines.append("")
+        for name, bal in balances.items():
+            lines.append(f"- **{name}:** {bal:.3f}")
+        lines.append("")
+
+    coalition_hist = result.get("coalition_history", {}).get("history", [])
+    if coalition_hist:
+        last = coalition_hist[-1]
+        coalition = last.get("coalition", [])
+        if len(coalition) >= 2:
+            lines.append(f"**Coalition reached:** {', '.join(coalition)}")
+            lines.append("")
+
+    # Outcome goes last, as it's the verdict on everything above.
+    outcome = result.get("outcome")
+    if outcome:
+        lines.append("---")
+        lines.append("")
+        lines.append("## Outcome of the debate")
+        lines.append("")
+        lines.append(f"**{outcome.get('label', '-')}**")
+        if outcome.get("notes"):
+            lines.append("")
+            lines.append(outcome["notes"])
+        lines.append("")
+
+    return "\n".join(lines)

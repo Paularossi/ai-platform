@@ -62,7 +62,7 @@ API_KEY_ENV_VARS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 class LLMProvider:
-    """Abstract base. Subclasses must implement complete()."""
+    """Abstract base. Subclasses must implement complete() and stream()."""
 
     def complete(
         self,
@@ -72,6 +72,17 @@ class LLMProvider:
         max_tokens: int = 1500,
         temperature: float = 0.0,
     ) -> str:
+        raise NotImplementedError
+
+    def stream(
+        self,
+        model: str,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int = 1500,
+        temperature: float = 0.0,
+    ):
+        """Yield the response as it's generated, chunk by chunk (str pieces)."""
         raise NotImplementedError
 
 
@@ -102,6 +113,25 @@ class OpenAIProvider(LLMProvider):
         )
         return response.choices[0].message.content or ""
 
+    def stream(self, model, system_prompt, user_message,
+               max_tokens=1500, temperature=0.0):
+        response = self._get_client().chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_message},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
 
 # ---------------------------------------------------------------------------
 # Anthropic
@@ -127,6 +157,18 @@ class AnthropicProvider(LLMProvider):
             max_tokens=max_tokens,
         )
         return response.content[0].text if response.content else ""
+
+    def stream(self, model, system_prompt, user_message,
+               max_tokens=1500, temperature=0.0):
+        with self._get_client().messages.stream(
+            model=model,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +255,31 @@ class GoogleProvider(LLMProvider):
         if reason == "STOP":
             return ""
         return f"[BLOCKED: finish_reason={reason}]"
+
+    def stream(self, model: str, system_prompt: str, user_message: str,
+               max_tokens: int = 1500, temperature: float = 0.0):
+        """
+        Stream a Gemini response chunk by chunk. Only used for free-text
+        contribution calls (never json_mode — streaming raw JSON pieces to
+        the UI would just show broken fragments), so no json_mode param.
+        """
+        from google.genai import types
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+        try:
+            for chunk in self._get_client().models.generate_content_stream(
+                model=model,
+                contents=user_message,
+                config=config,
+            ):
+                if chunk.text:
+                    yield chunk.text
+        except Exception as exc:
+            yield f"[ERROR: {exc}]"
 
 
 # ---------------------------------------------------------------------------

@@ -6,12 +6,12 @@ A Streamlit-based platform for running structured multi-agent deliberation exper
 
 ## Overview
 
-Multiple LLM agents with distinct roles deliberate on a topic over several rounds. Each round has two phases:
- 
-- **Phase 1 (Contributions):** agents write a position statement, optionally seeing previous rounds.
-- **Phase 2 (Peer review):** agents score each other's contributions on configurable quality dimensions, receiving ECU (experimental currency unit) payouts. An Orchestrator uses the agents' own importance votes to update the ECU weight vector each round.
+Multiple LLM agents with distinct roles deliberate on a single topic over one or more rounds. Each round has two phases:
 
-The experiment ends when a coalition forms, the maximum number of rounds is reached, or (optionally) contributions converge.
+- **Phase 1 (Contributions):** agents write a position statement, optionally seeing previous rounds. In the UI, responses stream in live as they're generated.
+- **Phase 2 (Peer review - if enabled):** agents score each other's contributions on configurable quality dimensions, receiving ECU (experimental currency unit) payouts. An Orchestrator uses the agents' own importance votes to update the ECU weight vector each round.
+
+A run can be **automatic** (plays straight through and stops on the configured rule) or **manual** (pauses before every agent turn so you can review, edit, or write the prompt yourself, and end the debate whenever you decide it's over). The run ends when an outcome is selected, and the transcript and log become available to download.
 
 Note: check [this](https://github.com/Mathews-Tom/Agentic-Design-Patterns) book to understand better agentic design.
 
@@ -25,19 +25,18 @@ ai-platform/
 │   ├── Main.py                  # Streamlit entry point
 │   ├── components/utils.py      # restore_draft() helper
 │   └── pages/
-│       ├── 1_Welcome.py         # Step 1: experiment name, topic description
-│       ├── 2_Agent Setup.py     # Step 2: agents, protocol, ECU settings
-│       ├── 3_Instructions.py    # Step 3: base instructions, per-agent overrides
+│       ├── 1_Welcome.py         # Step 1: experiment name, author
+│       ├── 2_Agent Setup.py     # Step 2: agents, protocol, run mode, ECU settings
+│       ├── 3_Instructions.py    # Step 3: deliberation topic, base instructions, per-agent overrides
 │       ├── 4_Review.py          # Step 4: review config, save/load draft, launch
-│       └── 5_Run.py             # Run page: live feed, downloads, nav buttons
+│       └── 5_Run.py             # Step 5: live feed (streamed or manual step-through), outcome, downloads
 ├── core/
 │   ├── state.py                 # AgentOutput, PeerReviewOutput dataclasses
 │   ├── hub.py                   # CommunicationHub: routing, context, logging
-│   ├── agent.py                 # Agent: prompt construction, LLM call, parsing
-│   ├── providers.py             # LLM provider wrappers (OpenAI, Anthropic, Google)
+│   ├── agent.py                 # Agent: prompt construction, LLM call/stream, response parsing
+│   ├── providers.py             # LLM provider wrappers (OpenAI, Anthropic, Google) — complete() and stream()
 │   ├── ecu.py                   # PeerReviewRound, CoalitionTracker, EcuLedger
 │   ├── orchestrator.py          # Orchestrator: importance-vote gradient (Algorithm 1)
-│   ├── orchestrator_sandbox.py  # Archived: coordinate-search version (not used)
 │   ├── runner.py                # Shared construction helpers (used by UI and batch runner)
 │   └── protocols/
 │       ├── __init__.py          # RunEvent dataclass, build_ecu_info_str helper
@@ -45,7 +44,7 @@ ai-platform/
 │       └── gossip.py            # Sequential protocol (origination/anchoring)
 ├── experiments/
 │   ├── run_experiment.py        # Generic batch runner (no UI required)
-│   └── chess_test.json          # Example UI draft (single scenario)
+│   └── test_thinking.json       # Example UI draft (single scenario)
 ├── tests/
 │   └── test_pipeline.py         # 81-test dry-run pipeline test suite
 ├── literature/
@@ -99,10 +98,10 @@ ai-platform/
    ```
 ---
 
-## Experiment flow (UI - 4 steps)
+## Experiment flow (UI - 5 steps)
 
-### Step 1 — Overview
-Name, author, and a brief description of the experiment for your own reference. The actual deliberation question is set in Step 3.
+### Step 1 — Welcome
+Name and author for the experiment, for your own reference.
 
 ### Step 2 — Agent Setup
 
@@ -114,6 +113,14 @@ Name, author, and a brief description of the experiment for your own reference. 
 | **Simultaneous** (crowd) | All agents contribute blindly in Phase 1, then peer-review in Phase 2 | Pure deliberation quality, no anchoring |
 | **Sequential** (gossip) | Agents contribute one by one; later agents see earlier same-round contributions | Origination bias, anchoring, information cascade |
 
+**Run mode** (decided upfront, part of the protocol definition):
+| Mode | Behaviour |
+|---|---|
+| **Automatic** | Plays straight through using the stopping rule below |
+| **Manual (step-through)** | Pauses before every agent turn so you can review and edit the exact prompt, then approve it to send. You decide when the debate ends — there's no round limit or stopping rule to configure |
+
+**Sequential order** (Sequential setting only): `Fixed`, `Randomized each cycle`, or `Custom order` (rank agents explicitly).
+
 **Information flow (two separate axes):**
 
 | Axis | Setting | What it controls |
@@ -123,7 +130,7 @@ Name, author, and a brief description of the experiment for your own reference. 
 
 Round 1 is always blind for φ₁ regardless of setting since no prior contributions exist.
 
-**Stopping rule:** `Max cycles`, `Convergence` (stable coalition), or `Either`.
+**Stopping rule** (Automatic mode only): `Max cycles`, `Convergence` (stable coalition), or `Either`.
 
 **ECU / peer review — T/S/O information condition:**
 
@@ -140,12 +147,15 @@ Under T and S, the system prompt informs agents that their contributions are pee
 **Orchestrator:** when enabled, updates ECU weights every K rounds using agents' importance votes (see below).
 
 ### Step 3 — Instructions & topic
-Write the deliberation question and base instructions for all agents. Optionally add per-agent prompt overrides and guideline notes. The question is injected into each agent's user message at runtime.
+Write the single deliberation topic and base instructions for all agents. Optionally add per-agent prompt overrides and guideline notes. The topic is injected into each agent's user message at runtime.
 
-The prompt preview updates live based on the current φ₁ and ECU information condition settings.
+The prompt preview updates live based on the current φ₁ and ECU information condition settings, and omits any peer-review-specific text when ECU scoring is turned off.
 
-### Step 4 — Review
-Inspect the full configuration, save or load a JSON draft, then launch the experiment.
+### Step 4 — Review & Launch
+Inspect the full configuration, save or load a JSON draft, then launch.
+
+### Step 5 — Run
+Watch the deliberation unfold as a live chat feed, with each contribution streaming in as it's generated. In manual mode, you approve (and can edit) every prompt before it's sent, and end the run yourself with "Stop here." Once the run ends, select an outcome — how the debate settled — with optional notes; saving it closes the debate and unlocks the transcript and log downloads.
 
 ---
 
@@ -154,13 +164,13 @@ Inspect the full configuration, save or load a JSON draft, then launch the exper
 **Phase 1 — Contributions**
 
 Each agent writes a position statement. Their context contains:
-- The deliberation question (always)
+- The deliberation topic (always)
 - Previous round contributions from other agents (if φ₁ ≠ Blind)
 - Their own previous contribution, labelled "(your contribution)"
 - Peer review scores received last round (if ECU enabled)
 - ECU balances and weights (T or S condition only)
 
-Round 1 is always blind regardless of φ₁ since no prior contributions exist.
+Round 1 is always blind regardless of φ₁ since no prior contributions exist. In an automatic or manual UI run, the response streams into the live feed token by token as the model generates it.
 
 **Phase 2 — Peer review**
 
@@ -216,7 +226,20 @@ When enabled, runs every K rounds after peer review completes. Uses an **importa
 
 The $1/t$ schedule satisfies the Robbins-Monro conditions: larger updates early, diminishing over time, converging in ratio as rounds accumulate.
 
-The archived coordinate-search version (sandbox re-runs) is in `orchestrator_sandbox.py` and is not used by the platform.
+---
+
+## Outcome types
+
+At the end of a run — automatic or manual — you classify how the deliberation settled and log it alongside the transcript. The platform never infers this automatically; it's a judgment call made from reading the log:
+
+| Outcome | Description |
+|---|---|
+| **Full consensus** | Agents converge to a single stable position |
+| **Static equilibrium** | A stable distribution of positions (e.g. 20% vs 80%) |
+| **Dynamic equilibrium** | A partially stable distribution with periodic shifts between positions |
+| **Chaotic state** | Unstable, non-converging, highly variable outputs |
+
+Consensus is one valid outcome among several, not the default to aim for. Saving an outcome (with optional notes) closes the debate and unlocks the downloads below.
 
 ---
 
@@ -225,8 +248,7 @@ The archived coordinate-search version (sandbox re-runs) is in `orchestrator_san
 Experiments can be run programmatically from the command line using `experiments/run_experiment.py`. This is useful for running multiple scenario combinations without touching the UI.
 
 ```bash
-python experiments/run_experiment.py experiments/chess_test.json
-python experiments/run_experiment.py experiments/congestion_pricing.json --dry-run
+python experiments/run_experiment.py experiments/test_thinking.json
 ```
 
 **Experiment JSON format** - two variants are accepted:
@@ -259,36 +281,31 @@ python experiments/run_experiment.py experiments/congestion_pricing.json --dry-r
 
 ## Providers
 
-Three LLM providers are supported. Each is a thin wrapper around its SDK.
+Three LLM providers are supported. Each is a thin wrapper around its SDK, exposing both a blocking `complete()` call and a `stream()` generator for live token-by-token output.
 
 | Provider | SDK | Models |
 |---|---|---|
 | **OpenAI** | `openai` | `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, `o1`, `o1-mini` |
 | **Anthropic** | `anthropic` | `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
-| **Google** | `google-genai` | `gemini-2.0-flash`, `gemini-2.5-pro`, `gemini-2.5-flash` |
+| **Google** | `google-genai` | `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash` |
 
 Agents from different providers can participate in the same experiment.
 
-Adding a new provider: subclass `LLMProvider` in `core/providers.py`, add it to `PROVIDERS`, `PROVIDER_MODELS`, and `API_KEY_ENV_VARS`.
+Adding a new provider: subclass `LLMProvider` in `core/providers.py` (implement both `complete()` and `stream()`), add it to `PROVIDERS`, `PROVIDER_MODELS`, and `API_KEY_ENV_VARS`.
 
 ---
 
 ## Output
 
-After a UI run, two downloads are available:
+**From a UI run**, once an outcome has been saved:
+- **Transcript (.md)** — a readable, round-by-round record of the deliberation, ending with the outcome and any notes. Meant to read or share directly.
+- **Full log (.json)** — the complete machine-readable record: contributions, peer reviews, ECU ledger, coalition history, orchestrator updates, the outcome, and every prompt sent.
 
-**Results CSV** - one row per item:
-- `coalition_final`, `coalition_size`, `coalition_reached`
-- `ecu_{AgentName}` - final cumulative ECU balance
-- `pr_{AgentName}_{dimension}` - mean peer score from last round
+**From a batch run**, per scenario:
+- One JSON file with the same full record as above.
+- A summary CSV across all scenarios in the run — `coalition_final`, `coalition_size`, `coalition_reached`, `ecu_{AgentName}` (final cumulative balance), `pr_{AgentName}_{dimension}` (mean peer score from the last round).
 
-**Full log JSON** - complete record including:
-- `log` - contributions, ECU scores, ECU earned per agent per round
-- `peer_review_log` - dimension scores, justifications, and importance votes per reviewer per round
-- `coalition_history` - coalition members and size after each round
-- `orchestrator` - full importance-vote update history per round (raw votes, mean votes, normalised votes, learning rate, old and new weights)
-- `ecu_ledger` - final weights, balances, and social welfare history
-- `prompt_log` - every prompt and response, labelled by phase (`contribution` or `peer_review`). Use to verify φ₁/φ₂/T/S/O settings are applied correctly.
+In both cases, the JSON's `prompt_log` records every prompt and response, labelled by phase (`contribution` or `peer_review`) — use it to verify φ₁/φ₂/T/S/O settings were applied correctly.
 
 ---
 
@@ -304,7 +321,7 @@ python tests/test_pipeline.py
 
 ## Key design decisions
 
-**No hardcoded prompts.** System prompts contain only user-defined content (role description, base instructions, guidelines, dimension rubrics). The deliberation item is always injected at runtime and never baked into the instructions. Dimension rubrics are defined entirely in the experiment config and rendered verbatim into the peer review prompt.
+**No hardcoded prompts.** System prompts contain only user-defined content (role description, base instructions, guidelines, dimension rubrics). The deliberation topic is always injected at runtime and never baked into the instructions. Dimension rubrics are defined entirely in the experiment config and rendered verbatim into the peer review prompt.
 
 **ECU feedback without direction.** Under T or S conditions, agents are told what they can observe (scores, balances, weights) but are given no instruction on how to respond to this information. The goal is to observe whether agents adapt their strategy organically, not to coach them toward higher scores.
 
@@ -313,6 +330,8 @@ python tests/test_pipeline.py
 **Two separate weight vectors.** $w^{SW}$ (social welfare weights) are fixed by the experimenter and define what good deliberation looks like from the social planner's perspective. $w^{ECU}$ (incentive weights) are the Orchestrator's decision variable and are updated by Algorithm 1. The connection between them is indirect: changing $w^{ECU}$ shifts agent incentives, which changes contributions, which changes peer scores, which changes $SW^{(t)}$ even though $w^{SW}$ never moves.
 
 **Participatory weight updating.** The Orchestrator uses agents' own importance votes rather than sandbox re-runs, making weight updating free (no extra API calls) and participatory - agents themselves determine the gradient direction.
+
+**Outcome classification stays human.** The four outcome types (full consensus, static equilibrium, dynamic equilibrium, chaotic state) are never auto-detected from the log — whoever runs the experiment reads the transcript and picks one, with consensus deliberately not privileged as the "correct" result.
 
 **Shared construction layer.** `core/runner.py` contains all experiment construction logic (building agents, protocols, hubs, ECU components). Both the Streamlit UI and the batch runner import from it, ensuring they run identical pipelines. The UI owns streaming and rendering; `runner.py` owns everything else.
 

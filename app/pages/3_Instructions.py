@@ -56,9 +56,7 @@ def sync_to_config():
     st.session_state.experiment_config["agent_prompt_overrides"] = \
         st.session_state.get("agent_prompt_overrides", {})
 
-    # Deliberation runs are single-topic by default. Keep a one-row internal
-    # dataframe so the runner can reuse the existing item-processing pipeline
-    # without a separate dataset page.
+    # Deliberation runs are single-topic by default
     if topic:
         st.session_state.dataset_df = pd.DataFrame([{"topic": topic}])
         st.session_state.column_mapping = {"topic": "topic"}
@@ -167,7 +165,6 @@ with main_col:
             base_instructions=st.session_state.get("base_instructions", ""),
             guideline_notes=st.session_state.get("guideline_notes", ""),
             agent_overrides=st.session_state.get("agent_prompt_overrides", {}),
-            questions=[],
             ecu_info_condition=ecu_cfg.get("info_condition", "opaque"),
             ecu_dimensions=ecu_cfg.get("dimensions", []),
         )
@@ -182,6 +179,13 @@ with main_col:
         else:
             history_header = "=== Previous round ==="
             history_note = "← shown from round 2 onwards (φ₁: Previous round)"
+
+        peer_review_on = st.session_state.experiment_config.get("ecu", {}).get("enabled", False)
+        peer_review_lines = (
+            "Peer review scores (average received, last round):\n"
+            "  Agent 1: depth_breadth: 0.xx, ...\n"
+            if peer_review_on else ""
+        )
         st.markdown("**User message structure:**")
         st.code(
             f"topic: {topic}\n\n"
@@ -189,11 +193,12 @@ with main_col:
             "Contributions:\n"
             "  [Agent 1]: ...\n"
             "  [Agent 2]: ...\n"
-            "Peer review scores (average received, last round):\n"
-            "  Agent 1: depth_breadth: 0.xx, ...\n"
+            f"{peer_review_lines}"
             "=== Your turn ===",
             language=None,
         )
+        if not peer_review_on:
+            st.caption("Peer review is off (Agent Setup → ECU quality dimensions), so no peer review scores are sent to agents.")
 
     nav1, nav2, nav3 = st.columns([2, 2, 2])
     with nav1:

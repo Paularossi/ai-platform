@@ -112,10 +112,15 @@ with main_col:
         st.subheader("2. Protocol & agents")
         proto = draft["protocol"]
 
+        is_manual = proto.get("run_mode", "Automatic") == "Manual (step-through)"
+
         c1, c2, c3 = st.columns(3)
         c1.markdown(f"**Setting**\n\n{val(proto.get('setting'))}")
-        c2.markdown(f"**Max cycles**\n\n{val(proto.get('max_cycles'))}")
-        c3.markdown(f"**Stopping rule**\n\n{val(proto.get('stopping_rule'))}")
+        c2.markdown(f"**Run mode**\n\n{val(proto.get('run_mode', 'Automatic'))}")
+        if is_manual:
+            c3.markdown("**Stopping**\n\nYou decide (Manual mode)")
+        else:
+            c3.markdown(f"**Stopping rule**\n\n{val(proto.get('stopping_rule'))} (max {val(proto.get('max_cycles'))} cycles)")
 
         c1, c2, c3 = st.columns(3)
         c1.markdown(f"**φ₁ Visibility**\n\n{val(proto.get('visibility_mode'))}")
@@ -126,7 +131,7 @@ with main_col:
         if ecu.get("enabled"):
             st.divider()
             c1, c2, c3, c4 = st.columns(4)
-            c1.markdown(f"**ECU**\n\n✅ enabled")
+            c1.markdown("**ECU**\n\n✅ enabled")
             c2.markdown(f"**T/S/O**\n\n{val(ecu.get('info_condition'))}")
             c3.markdown(f"**Self-assessment**\n\n{'Yes' if ecu.get('include_self_assessment') else 'No'}")
             c4.markdown(f"**Coalition τ**\n\n{val(ecu.get('coalition_threshold'))}")
@@ -151,6 +156,27 @@ with main_col:
         if agents:
             st.divider()
             st.markdown(f"**{len(agents)} agent(s)**")
+
+            # Turn order only applies to Sequential — Simultaneous has all
+            # agents contribute blind in the same round, so there's no order.
+            if proto.get("setting") in ("Sequential", "Gossip (sequential)"):
+                order_type = proto.get("order_type", "Fixed")
+                agent_names_list = [a.get("name", f"Agent {i+1}") for i, a in enumerate(agents)]
+                if order_type == "Custom order":
+                    custom = proto.get("custom_order", [])
+                    ordered = [n for n in custom if n in agent_names_list]
+                    ordered += [n for n in agent_names_list if n not in custom]
+                    st.caption(f"Order (custom): {' → '.join(ordered)}")
+                elif order_type == "Randomized each cycle":
+                    st.caption("Order: randomized each round")
+                else:
+                    initializer = proto.get("initializer_agent")
+                    ordered = agent_names_list
+                    if initializer in agent_names_list:
+                        idx = agent_names_list.index(initializer)
+                        ordered = agent_names_list[idx:] + agent_names_list[:idx]
+                    st.caption(f"Order (fixed): {' → '.join(ordered)}")
+
             cols = st.columns(min(len(agents), 3))
             for i, agent in enumerate(agents):
                 with cols[i % 3]:

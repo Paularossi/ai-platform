@@ -8,7 +8,7 @@ Components
 
   PeerReviewRound
   ---------------
-  Prompts each agent to score all other agents on the four quality
+  Prompts each agent to score all other agents on the defined quality
   dimensions and report a coalition agreement score (0-1) per peer.
   Returns a list of PeerReviewOutput objects.
 
@@ -32,14 +32,14 @@ Components
 
   EcuLedger
   ---------
-  Unchanged — accumulates per-agent ecu balances and records history.
+  Accumulates per-agent ecu balances and records history.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import combinations
 from typing import Any
 
@@ -117,15 +117,11 @@ class PeerReviewRound:
         include_self_assessment: bool = False,
         review_depth: str = "Previous Round",
         dry_run: bool = False,
-        reviewer_provider: str = "OpenAI",
-        reviewer_model: str = "gpt-4o",
     ):
         self.dimensions = dimensions or DEFAULT_DIMENSIONS
         self.include_self_assessment = include_self_assessment
         self.review_depth = review_depth
         self.dry_run = dry_run
-        self.reviewer_provider = reviewer_provider
-        self.reviewer_model = reviewer_model
 
     def build_prompt(
         self,
@@ -368,38 +364,6 @@ class PeerReviewRound:
             raw_response=raw,
         )
 
-    # Keep run() as a convenience wrapper that makes the LLM call directly
-    # — used when no Agent object is available (e.g. standalone testing).
-    # In the main protocol flow, the protocol calls agent.call() instead.
-    def run(
-        self,
-        reviewer_name: str,
-        reviewer_contribution: Any,
-        all_contributions: dict[str, Any],
-        cycle: int,
-        item_context: str = "",
-        ecu_info: str = "",
-    ) -> PeerReviewOutput:
-
-        prompt = self.build_prompt(
-            reviewer_name, reviewer_contribution, all_contributions,
-            cycle, item_context, ecu_info,
-        )
-        try:
-            from core.providers import get_provider
-            pr_kwargs = {"json_mode": True} if self.reviewer_provider == "Google" else {}
-            raw = get_provider(self.reviewer_provider).complete(
-                model=self.reviewer_model,
-                system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
-                user_message=prompt,
-                max_tokens=800,
-                **pr_kwargs,
-            )
-        except Exception as exc:
-            raw = f"[ERROR: {exc}]"
-
-        return self.parse(reviewer_name, cycle, raw, all_contributions)
-
 
 # ---------------------------------------------------------------------------
 # CoalitionTracker
@@ -573,8 +537,7 @@ class EcuLedger:
         if ecu_weights:
             self.ecu_weights.update(ecu_weights)
 
-        # w^SW: fixed social-planner valuation weights. These are not updated
-        # by the Orchestrator.
+        # w^SW: fixed social-planner valuation weights. These are not updated by the Orchestrator.
         self.sw_weights: dict[str, float] = dict(default_weights)
         if sw_weights:
             self.sw_weights.update(sw_weights)
@@ -659,22 +622,9 @@ class EcuLedger:
 
         return ecu
 
-    @property
-    def weights(self) -> dict[str, float]:
-        """Backward-compatible alias for variable ECU weights w^ECU."""
-        return self.ecu_weights
-
-    def update_weights(self, new_weights: dict[str, float]) -> None:
-        """Update variable ECU incentive weights w^ECU."""
-        self.ecu_weights.update(new_weights)
-
     def update_ecu_weights(self, new_weights: dict[str, float]) -> None:
-        """Explicit alias for updating w^ECU."""
-        self.update_weights(new_weights)
-
-    def update_sw_weights(self, new_weights: dict[str, float]) -> None:
-        """Update fixed SW valuation weights manually; the Orchestrator should not call this."""
-        self.sw_weights.update(new_weights)
+        """Update variable ECU incentive weights w^ECU. Called by the Orchestrator."""
+        self.ecu_weights.update(new_weights)
 
     def mean_peer_scores(self, reviews: list[PeerReviewOutput]) -> dict[str, float]:
         """
@@ -721,41 +671,9 @@ class EcuLedger:
         """Return the cumulative ECU balance for one agent."""
         return self._balances.get(agent_name, 0.0)
 
-    def last_round_ecu_for(self, agent_name: str) -> float:
-        """
-        Return the ECU earned by an agent in the most recent round.
-
-        Used as a reputation signal: reflects current performance rather than
-        cumulative history, so reputation can rise and fall across rounds.
-        Returns 0.0 if the agent has no recorded history.
-        """
-        agent_records = [r for r in reversed(self._history) if r.agent_name == agent_name]
-        if not agent_records:
-            return 0.0
-        latest_cycle = agent_records[0].cycle
-        cycle_records = [r for r in agent_records if r.cycle == latest_cycle]
-        return sum(r.ecu_earned for r in cycle_records)
-
-    def reputation_scores(self) -> dict[str, float]:
-        """
-        Return {agent_name: last_round_ecu} for all agents.
-
-        Convenience method for passing reputation context into prompts or
-        weighting peer review scores.
-        """
-        return {name: self.last_round_ecu_for(name) for name in self._balances}
-
     @property
     def social_welfare_history(self) -> list[dict[str, Any]]:
         return list(self._social_welfare_history)
-
-    def scores_by_dimension(self) -> dict[str, list[float]]:
-        result: dict[str, list[float]] = {d: [] for d in self.dim_names}
-        for rec in self._history:
-            for dim, score in rec.aggregated_scores.items():
-                if dim in result:
-                    result[dim].append(score)
-        return result
 
     def to_dict(self) -> dict:
         return {

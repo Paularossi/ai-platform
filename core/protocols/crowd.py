@@ -16,7 +16,7 @@ Phase 1:
         dispatch  → RunEvent("dispatch")
         LLM call  → RunEvent("submission")
 
-Phase 2 (if peer_reviewer configured):
+Phase 2 (if Peer Review enabled):
     For each agent:
         peer review LLM call  → RunEvent("peer_review")
     ECU update               → RunEvent("ecu_update")
@@ -61,19 +61,11 @@ class CrowdProtocol:
         self.max_cycles: int = int(protocol.get("max_cycles", 5))
         self.stopping_rule: str = protocol.get("stopping_rule", "Either")
 
-
-    def run(self, hub: CommunicationHub) -> CommunicationHub:
-        for _ in self.run_iter(hub):
-            pass
-        return hub
-
     def run_iter(self, hub: CommunicationHub) -> Iterator[RunEvent]:
 
         for cycle_idx in range(self.max_cycles):
 
-            # Snapshot the official pre-round state. Counterfactual orchestrator
-            # evaluations clone this snapshot so sandbox outputs never enter the
-            # official dialogue history.
+            # Snapshot the official pre-round state.
 
             # ── Phase 1: simultaneous blind contributions ─────────────────
             # Build all packets from a pre-round snapshot so no agent sees
@@ -86,13 +78,39 @@ class CrowdProtocol:
             round_outputs: list[AgentOutput] = []
 
             for agent, packet in packets:
-                yield RunEvent(
+                system_prompt, user_message = agent.build_prompt(packet)
+                injected = yield RunEvent(
                     kind="dispatch",
                     cycle=cycle_idx,
                     agent_name=agent.name,
                     packet=packet,
+                    prompt={"system": system_prompt, "user": user_message},
                 )
-                output = agent.call(packet, dry_run=self.dry_run)
+                # See gossip.py / RunEvent docstring: resuming with
+                # .send({...}) instead of next() can override the prompt
+                # and/or supply a human-typed contribution for this turn.
+                human_input = None
+                if isinstance(injected, dict):
+                    system_prompt = injected.get("system", system_prompt)
+                    user_message = injected.get("user", user_message)
+                    human_input = injected.get("human_input")
+
+                if self.dry_run or human_input is not None:
+                    output = agent.send(
+                        packet, system_prompt, user_message,
+                        dry_run=self.dry_run, human_input=human_input,
+                    )
+                else:
+                    # Stream the LLM call chunk by chunk so it appears as a live typing effect.
+                    for chunk in agent.stream(packet, system_prompt, user_message):
+                        yield RunEvent(
+                            kind="stream_chunk",
+                            cycle=cycle_idx,
+                            agent_name=agent.name,
+                            packet=packet,
+                            chunk=chunk,
+                        )
+                    output = agent.finalize_stream(packet)
                 hub.submit(output)
                 round_outputs.append(output)
                 hub.log_prompt(cycle_idx, agent.name, "contribution",

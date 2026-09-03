@@ -18,7 +18,7 @@ Phase 1:
         dispatch  → RunEvent("dispatch")
         LLM call  → RunEvent("submission")
 
-Phase 2 (if peer_reviewer configured):
+Phase 2 (if Peer Review enabled):
     For each agent:
         peer review LLM call  → RunEvent("peer_review")
     ECU update               → RunEvent("ecu_update")
@@ -42,8 +42,7 @@ class GossipProtocol:
     Sequential deliberation protocol.
 
     Agents contribute one by one; later agents see earlier agents' same-round
-    contributions before writing their own. Studies origination bias and
-    sequential anchoring.
+    contributions before writing their own. Studies origination bias and sequential anchoring.
     """
 
     def __init__(
@@ -66,20 +65,13 @@ class GossipProtocol:
         self.stopping_rule: str = protocol.get("stopping_rule", "Either")
         self.order_type: str = protocol.get("order_type", "Fixed")
         self.initializer_name: str | None = protocol.get("initializer_agent")
-
-
-    def run(self, hub: CommunicationHub) -> CommunicationHub:
-        for _ in self.run_iter(hub):
-            pass
-        return hub
+        self.custom_order: list[str] = protocol.get("custom_order", [])
 
     def run_iter(self, hub: CommunicationHub) -> Iterator[RunEvent]:
         ordered_agents = self._build_agent_order()
 
         for cycle_idx in range(self.max_cycles):
-            # Snapshot the official pre-round state. Counterfactual orchestrator
-            # evaluations clone this snapshot so sandbox outputs never enter the
-            # official dialogue history.
+            # Snapshot the official pre-round state.
 
             if self.order_type == "Randomized each cycle" and cycle_idx > 0:
                 ordered_agents = self._build_agent_order(randomize=True)
@@ -91,13 +83,39 @@ class GossipProtocol:
 
             for agent in ordered_agents:
                 packet = hub.build_context(agent.name, cycle_idx)
-                yield RunEvent(
+                system_prompt, user_message = agent.build_prompt(packet)
+                injected = yield RunEvent(
                     kind="dispatch",
                     cycle=cycle_idx,
                     agent_name=agent.name,
                     packet=packet,
+                    prompt={"system": system_prompt, "user": user_message},
                 )
-                output = agent.call(packet, dry_run=self.dry_run)
+                # A user that resumes with .send({...}) instead of next()
+                # can override the prompt text and/or supply a human-typed
+                # contribution before this turn is dispatched. 
+                human_input = None
+                if isinstance(injected, dict):
+                    system_prompt = injected.get("system", system_prompt)
+                    user_message = injected.get("user", user_message)
+                    human_input = injected.get("human_input")
+
+                if self.dry_run or human_input is not None:
+                    output = agent.send(
+                        packet, system_prompt, user_message,
+                        dry_run=self.dry_run, human_input=human_input,
+                    )
+                else:
+                    # Stream the LLM call chunk by chunk so it appears as a live typing effect.
+                    for chunk in agent.stream(packet, system_prompt, user_message):
+                        yield RunEvent(
+                            kind="stream_chunk",
+                            cycle=cycle_idx,
+                            agent_name=agent.name,
+                            packet=packet,
+                            chunk=chunk,
+                        )
+                    output = agent.finalize_stream(packet)
                 hub.submit(output)
                 round_outputs.append(output)
                 hub.log_prompt(cycle_idx, agent.name, "contribution",
@@ -227,6 +245,15 @@ class GossipProtocol:
 
     def _build_agent_order(self, randomize: bool = False) -> list[Agent]:
         agents = list(self.agents)
+
+        if self.order_type == "Custom order" and self.custom_order:
+            by_name = {a.name: a for a in agents}
+            ordered = [by_name[name] for name in self.custom_order if name in by_name]
+            # Any agent not named in custom_order (e.g. added after the order
+            # was set) is appended at the end rather than silently dropped.
+            remaining = [a for a in agents if a.name not in set(self.custom_order)]
+            return ordered + remaining
+
         if self.initializer_name:
             names = [a.name for a in agents]
             if self.initializer_name in names:

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +40,7 @@ class AgentOutput:
     """
     agent_name: str
     cycle: int
-    contribution: Any = None
+    contribution: str | None = None
     changed: dict[str, bool] = field(default_factory=dict)
     ecu_scores: dict[str, float] = field(default_factory=dict)
     ecu_earned: float | None = None

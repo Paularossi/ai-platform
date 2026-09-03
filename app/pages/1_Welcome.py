@@ -8,21 +8,19 @@ from components.utils import restore_draft
 
 def clear_experiment_state():
     keys_to_clear = [
-        "experiment_config", "input_fields", "question_sets",
+        "experiment_config",
         "base_instructions", "guideline_notes", "agent_prompt_overrides",
         "agents", "num_agents", "interaction_setting",
-        "supervision_mode", "visibility_mode", "order_type", "max_cycles",
-        "stopping_rule", "initializer_agent", "judge_agent",
-        "exp_name", "author", "task_category", "modalities",
-        "task_description", "dataset_df", "dataset_filename",
-        "column_mapping", "dataset_ready", "run_results",
+        "run_mode", "visibility_mode", "order_type", "custom_order", "max_cycles",
+        "stopping_rule", "initializer_agent", "exp_name", "author",
+        "task_description", "dataset_df", "column_mapping", "run_results",
     ]
     for key in keys_to_clear:
         st.session_state.pop(key, None)
 
 
 st.title("🧠 Multi-Agent Lab")
-st.caption("A configurable platform for studying multi-agent AI interaction, consensus formation, and bias in structured tasks.")
+st.caption("A configurable platform for studying multi-agent AI interaction, consensus formation, and bias in free-form debates.")
 
 st.divider()
 
@@ -54,7 +52,6 @@ with left:
             st.session_state.experiment_config = {
                 "overview": {"name": name_input, "author": author_input},
                 "task": {"description": ""},
-                "questions": [],
                 "instructions": {"base_instructions": "", "guideline_notes": ""},
             }
             st.session_state.exp_name = name_input

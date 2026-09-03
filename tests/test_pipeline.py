@@ -22,7 +22,7 @@ import json
 
 sys.path.insert(0, ".")
 
-from core.state import AgentOutput, PeerReviewOutput
+from core.state import AgentOutput
 from core.hub import CommunicationHub, ContextPacket
 from core.agent import Agent, _build_system_prompt, _build_user_message
 from core.ecu import PeerReviewRound, CoalitionTracker, EcuLedger, DEFAULT_DIMENSIONS
@@ -71,7 +71,6 @@ EXPERIMENT_CFG = {
         ),
         "guideline_notes": "",
     },
-    "questions": [],
     "agent_prompt_overrides": {},
 }
 
@@ -310,7 +309,6 @@ def test_prompt_construction() -> None:
         "You are a policy advisor.",
         "",
         {},
-        [],
     )
     check("System prompt contains agent name", "Economist" in system)
     check("System prompt contains custom role description", "welfare economics" in system)
@@ -324,7 +322,7 @@ def test_prompt_construction() -> None:
         cycle=0,
         agent_name="Economist",
     )
-    msg0 = _build_user_message(packet0, [])
+    msg0 = _build_user_message(packet0)
     check("Round-0 user message contains item data", "congestion charges" in msg0)
     check("Round-0 user message has no history", "Previous round" not in msg0)
 
@@ -344,7 +342,7 @@ def test_prompt_construction() -> None:
         cycle=1,
         agent_name="Economist",
     )
-    msg1 = _build_user_message(packet1, [])
+    msg1 = _build_user_message(packet1)
     check("Round-1 message has previous round section", "Previous round" in msg1)
     check("Round-1 message shows peer contributions", "Urban Planner" in msg1)
     check("Round-1 message shows peer review scores", "Peer review scores" in msg1)

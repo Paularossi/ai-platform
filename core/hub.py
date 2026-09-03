@@ -44,9 +44,8 @@ class ContextPacket:
     item_id : str
     item_data : dict
         The raw input (text, image path / URL, etc.)
-    current_contribution : Any
-        The most recent agreed contribution/labels, regardless of who set it.
-        str for deliberation tasks, dict[field→verdict] for classification.
+    current_contribution : str | None
+        The most recent contribution, regardless of which agent wrote it.
     visible_history : list[AgentOutput]
         The slice of the message log this agent is allowed to see.
         Content depends on visibility_mode.
@@ -61,7 +60,7 @@ class ContextPacket:
     """
     item_id: str
     item_data: dict[str, Any]
-    current_contribution: Any
+    current_contribution: str | None
     visible_history: list[AgentOutput]
     cycle: int
     agent_name: str
@@ -124,9 +123,9 @@ class CommunicationHub:
         self._log: list[AgentOutput] = []
         self._peer_review_log: list[PeerReviewOutput] = []
         self._prompt_log: list[dict] = []  # {cycle, agent, phase, prompt, response}
-        self._current_contribution: Any = None
+        self._current_contribution: str | None = None
         self.originator_name: str | None = None
-        self.originator_contribution: Any = None
+        self.originator_contribution: str | None = None
         self.converged: bool = False
 
     # ------------------------------------------------------------------
@@ -167,21 +166,8 @@ class CommunicationHub:
     def submit(self, output: AgentOutput) -> None:
         """Accept a Phase 1 AgentOutput and store it."""
         prev = self._current_contribution
-
-        if isinstance(output.contribution, dict) and isinstance(prev, dict):
-            output.changed = {
-                fname: (output.contribution.get(fname) != prev.get(fname))
-                for fname in output.contribution
-            }
-        elif output.contribution != prev:
-            output.changed = {"__contribution__": True}
-        else:
-            output.changed = {}
-
-        if isinstance(output.contribution, dict) and isinstance(self._current_contribution, dict):
-            self._current_contribution.update(output.contribution)
-        else:
-            self._current_contribution = output.contribution
+        output.changed = {"__contribution__": True} if output.contribution != prev else {}
+        self._current_contribution = output.contribution
 
         if not self._log:
             self.originator_name = output.agent_name
@@ -263,33 +249,8 @@ class CommunicationHub:
         return list(self._log)
 
     @property
-    def current_contribution(self) -> Any:
-        return self._current_contribution
-
-    # Keep current_labels as a convenience alias for classification tasks
-    @property
-    def current_labels(self) -> dict[str, Any]:
-        if isinstance(self._current_contribution, dict):
-            return self._current_contribution
-        return {}
-
-    def set_current_labels(self, labels: dict[str, Any]) -> None:
-        """
-        Override the current contribution state directly.
-        Used by aggregating protocols (e.g. Crowd) to push the round's
-        aggregated result after all individual submissions are collected.
-        """
-        self._current_contribution = labels
-
-    @property
     def num_submissions(self) -> int:
         return len(self._log)
-
-    def last_submission(self) -> AgentOutput | None:
-        return self._log[-1] if self._log else None
-
-    def submissions_by_agent(self, agent_name: str) -> list[AgentOutput]:
-        return [o for o in self._log if o.agent_name == agent_name]
 
     def log_prompt(self, cycle: int, agent_name: str, phase: str,
                    prompt: str, response: str = "") -> None:

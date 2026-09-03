@@ -16,6 +16,7 @@ from typing import Any
 from core.hub import ContextPacket
 from core.state import AgentOutput
 from core.providers import get_provider
+
 # Prompt builders
 # ---------------------------------------------------------------------------
 
@@ -25,7 +26,6 @@ def _build_system_prompt(
     base_instructions: str,
     guideline_notes: str,
     agent_overrides: dict[str, str],
-    questions: list[dict],
     ecu_info_condition: str = "opaque",
     ecu_dimensions: list[dict] | None = None,
 ) -> str:
@@ -69,23 +69,12 @@ def _build_system_prompt(
             )
         parts.append("")
 
-    if questions:
-        # Text/score-only questions without option codes
-        parts.append("--- Questions ---")
-        parts.append("Answer each question on its own line:")
-        parts.append("  field_name: your answer")
-        parts.append("")
-        for i, q in enumerate(questions, 1):
-            parts.append(f"Q{i}. [{q['field_name']}] {q.get('instruction', '')}")
-        parts.append("")
-
-    # Deliberation mode — no structured questions.
-    # Output format is entirely defined by the user's base_instructions.
+    # Output format is entirely defined by the user's base_instructions since this is a free-form deliberation.
 
     return "\n".join(parts)
 
 
-def _build_user_message(packet: ContextPacket, questions: list[dict]) -> str:
+def _build_user_message(packet: ContextPacket) -> str:
     parts: list[str] = []
 
     # ── Item data (from dataset) ──────────────────────────────────────────────
@@ -163,13 +152,50 @@ def _build_user_message(packet: ContextPacket, questions: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _parse_deliberation(
-    raw_text: str,
-    questions: list[dict],
-) -> tuple[str, dict, float | None, list[str], list[str]]:
+def unescape_literal_whitespace(text: str) -> str:
     """
-    Parse free-text deliberation response.
-    Extracts the main contribution, confidence (if reported), pros and cons.
+    Un-escape "\\n" so the text splits into real lines/paragraphs, both for parsing and for 
+    display (e.g. live streaming in the UI, where otherwise "\\n" shows up as literal text on the page).
+
+    Only touches the escape sequences a model would plausibly emit this way;
+    doesn't touch other backslashes, so a stray "C:\\notes" is left alone.
+    """
+    if "\\n" not in text and "\\r" not in text and "\\t" not in text:
+        return text
+    return (
+        text.replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\r", "\n")
+        .replace("\\t", "\t")
+    )
+
+
+# Matches a "LABEL = " style field line — e.g. "REASONING = ..." or "RESPONSE = ..." 
+# A plainsingle newline before such a line (as opposed to a blank line) doesn't
+# otherwise start a new paragraph, so without this the field boundary gets
+# silently merged into the same paragraph as whatever came before it.
+_FIELD_LABEL_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,30}\s*=")
+
+
+def _join_paragraphs(lines: list[str]) -> str:
+    """
+    Collapse a list of lines back into text: consecutive lines within a paragraph are joined 
+    with a space, but paragraph breaks are kept as a blank line.
+    """
+    paragraphs: list[list[str]] = [[]]
+    for line in lines:
+        if line == "":
+            if paragraphs[-1]:
+                paragraphs.append([])
+        else:
+            paragraphs[-1].append(line)
+    paragraphs = [p for p in paragraphs if p]
+    return "\n\n".join(" ".join(p) for p in paragraphs).strip()
+
+
+def _parse_deliberation(raw_text: str) -> str:
+    """
+    Parse a free-text deliberation response into the agent's contribution.
 
     Also handles the case where a model (e.g. Gemini in JSON mode) wraps
     the contribution in a JSON envelope like {"response": "..."}.
@@ -184,68 +210,29 @@ def _parse_deliberation(
                 raw_text = str(obj["response"])
         except Exception:
             pass  # not valid JSON — continue with raw_text as-is
-    pros: list[str] = []
-    cons: list[str] = []
-    confidence: float | None = None
+
+    raw_text = unescape_literal_whitespace(raw_text)
+
     contribution_lines: list[str] = []
 
-    lines = raw_text.splitlines()
-    in_pros = False
-    in_cons = False
-    in_contribution = True
-
-    for line in lines:
+    for line in raw_text.splitlines():
         stripped = line.strip()
         if not stripped:
+            # A blank line marks a paragraph break so record it as a "" marker
+            if contribution_lines and contribution_lines[-1] != "":
+                contribution_lines.append("")
             continue
 
-        if stripped.lower().startswith("pros:") or stripped.lower() == "pros":
-            in_pros, in_cons, in_contribution = True, False, False
+        # Skip Setext-style underline markers (e.g. "===" or "---" directly under a title line)
+        if re.fullmatch(r"[=\-]{3,}", stripped):
             continue
-        if stripped.lower().startswith("cons:") or stripped.lower() == "cons":
-            in_cons, in_pros, in_contribution = True, False, False
-            continue
+        # Strip leading Markdown heading markers (#, ##, ...)
+        stripped = re.sub(r"^#{1,6}\s*", "", stripped)
+        if _FIELD_LABEL_RE.match(stripped) and contribution_lines and contribution_lines[-1] != "":
+            contribution_lines.append("")
+        contribution_lines.append(stripped)
 
-        # Confidence line: "confidence: 0.85"
-        conf_match = re.match(r"^confidence\s*:\s*([0-9.]+)", stripped, re.IGNORECASE)
-        if conf_match:
-            in_contribution = False
-            try:
-                v = float(conf_match.group(1))
-                confidence = v / 100.0 if v > 1.0 else v
-            except ValueError:
-                pass
-            continue
-
-        if in_pros:
-            text = stripped[1:].strip() if stripped.startswith("-") else stripped
-            pros.append(text)
-        elif in_cons:
-            text = stripped[1:].strip() if stripped.startswith("-") else stripped
-            cons.append(text)
-        elif in_contribution:
-            # Skip Setext-style underline markers (e.g. "===" or "---" directly
-            # under a title line) — meaningless once lines are flattened below.
-            if re.fullmatch(r"[=\-]{3,}", stripped):
-                continue
-            # Strip leading Markdown heading markers (#, ##, ...) as some models open with a heading line. Since all lines are
-            # flattened into one paragraph below, a leading "#" would make the entire joined contribution render as one giant heading.
-            stripped = re.sub(r"^#{1,6}\s*", "", stripped)
-            contribution_lines.append(stripped)
-
-    # For text-only questions, also parse simple field: answer lines
-    if questions:
-        field_answers: dict[str, str] = {}
-        field_types = {q["field_name"]: q["field_type"] for q in questions}
-        for line in lines:
-            m = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+)$", line)
-            if m and m.group(1) in field_types:
-                field_answers[m.group(1)] = m.group(2).strip()
-        if field_answers:
-            return field_answers, {}, confidence, pros, cons
-
-    contribution = " ".join(contribution_lines).strip() or raw_text.strip()
-    return contribution, {}, confidence, pros, cons
+    return _join_paragraphs(contribution_lines) or raw_text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +248,7 @@ class Agent:
     config : dict
         Agent config from the UI: name, provider, model, role.
     experiment_config : dict
-        Full experiment config (instructions, questions, overrides).
+        Full experiment config (instructions, overrides).
     """
 
     def __init__(self, config: dict[str, Any], experiment_config: dict[str, Any]):
@@ -270,32 +257,25 @@ class Agent:
         self.model: str = config.get("model", "gpt-4o")
         self.temperature: float = float(config.get("temperature", 0.0))
 
-        # Resolve effective role: if the dropdown says "Custom", use the
-        # custom_role text the user typed; otherwise use the dropdown value.
         raw_role = config.get("role", "Participant")
         custom_role_text = config.get("custom_role", "").strip()
         self.role: str = custom_role_text if raw_role == "Custom" and custom_role_text else raw_role
 
         self._instructions = experiment_config.get("instructions", {})
-        self._questions = experiment_config.get("questions", [])
         self._overrides = experiment_config.get("agent_prompt_overrides", {})
         self._ecu_info_condition: str = experiment_config.get("ecu", {}).get("info_condition", "opaque")
         self._ecu_dimensions: list[dict] = experiment_config.get("ecu", {}).get("dimensions", [])
 
-        # Cached from last call() — used by protocols for prompt logging
+        # Cached from the last build_prompt() call — used by protocols for prompt logging
         self._last_system_prompt: str = ""
         self._last_user_message: str = ""
 
-    def call(self, packet: ContextPacket, dry_run: bool = False) -> AgentOutput:
+    def build_prompt(self, packet: ContextPacket) -> tuple[str, str]:
         """
-        Receive a ContextPacket from the hub, call the LLM, return AgentOutput.
-
-        Parameters
-        ----------
-        dry_run : bool
-            If True, skip the API call and return a placeholder contribution.
-            Used by the test suite to exercise the full pipeline without
-            incurring API costs.
+        Build the (system_prompt, user_message) pair for this agent's next
+        turn, without calling the LLM. Exposed separately from send() so a
+        caller (e.g. a step-through UI) can show the exact text about to be 
+        sent, let the user edit it, and only then dispatch it.
         """
         system_prompt = _build_system_prompt(
             agent_name=self.name,
@@ -303,14 +283,45 @@ class Agent:
             base_instructions=self._instructions.get("base_instructions", ""),
             guideline_notes=self._instructions.get("guideline_notes", ""),
             agent_overrides=self._overrides,
-            questions=self._questions,
             ecu_info_condition=self._ecu_info_condition,
             ecu_dimensions=self._ecu_dimensions,
         )
+        user_message = _build_user_message(packet)
+        return system_prompt, user_message
 
-        user_message = _build_user_message(packet, self._questions)
+    def send(
+        self,
+        packet: ContextPacket,
+        system_prompt: str,
+        user_message: str,
+        dry_run: bool = False,
+        human_input: str | None = None,
+    ) -> AgentOutput:
+        """
+        Dispatch an already-built (system_prompt, user_message) pair and
+        return the resulting AgentOutput.
+
+        Parameters
+        ----------
+        human_input : str | None
+            If set, skip the LLM call entirely and use this text as the
+            contribution instead (Control / human-moderated turns). The
+            returned AgentOutput has the same shape as an LLM-produced one,
+            so it is indistinguishable to other agents and to the hub.
+        dry_run : bool
+            If True (and human_input is None), skip the API call and return
+            a placeholder contribution. Used by the test suite.
+        """
         self._last_system_prompt = system_prompt
         self._last_user_message = user_message
+
+        if human_input is not None:
+            return AgentOutput(
+                agent_name=self.name,
+                cycle=packet.cycle,
+                contribution=human_input,
+                raw_response=None,
+            )
 
         if dry_run:
             dummy = "[dry-run: no contribution]"
@@ -332,8 +343,45 @@ class Agent:
         except Exception as exc:
             raw_text = f"[ERROR: {exc}]"
 
-        contribution, _, _, _, _ = _parse_deliberation(raw_text, self._questions)
+        contribution = _parse_deliberation(raw_text)
 
+        return AgentOutput(
+            agent_name=self.name,
+            cycle=packet.cycle,
+            contribution=contribution,
+            raw_response=raw_text,
+        )
+
+    def stream(self, packet: ContextPacket, system_prompt: str, user_message: str):
+        """
+        Stream an already-built pair chunk by chunk, for live UI rendering.
+
+        After the generator is exhausted, call finalize_stream(packet) to
+        get the resulting AgentOutput built from the accumulated text —
+        mirrors what send() does for a real (non-dry-run, non-human) call.
+        """
+        self._last_system_prompt = system_prompt
+        self._last_user_message = user_message
+        self._stream_chunks: list[str] = []
+        try:
+            provider = get_provider(self.provider)
+            for chunk in provider.stream(
+                model=self.model,
+                system_prompt=system_prompt,
+                user_message=user_message,
+                temperature=self.temperature,
+            ):
+                self._stream_chunks.append(chunk)
+                yield chunk
+        except Exception as exc:
+            err = f"[ERROR: {exc}]"
+            self._stream_chunks.append(err)
+            yield err
+
+    def finalize_stream(self, packet: ContextPacket) -> AgentOutput:
+        """Build the AgentOutput from the text accumulated by stream()."""
+        raw_text = "".join(getattr(self, "_stream_chunks", []))
+        contribution = _parse_deliberation(raw_text)
         return AgentOutput(
             agent_name=self.name,
             cycle=packet.cycle,
