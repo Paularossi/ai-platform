@@ -176,6 +176,7 @@ def collect_result(
         "log": [o.to_dict() for o in hub.log],
         "peer_review_log": [p.to_dict() for p in hub.peer_review_log],
         "prompt_log": hub.prompt_log,
+        "total_tokens": hub.total_tokens,
     }
 
 

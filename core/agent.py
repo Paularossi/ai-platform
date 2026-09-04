@@ -334,6 +334,7 @@ class Agent:
                 raw_response="[dry-run]",
             )
 
+        total_tokens = None
         try:
             provider = get_provider(self.provider)
             raw_text = provider.complete(
@@ -342,6 +343,7 @@ class Agent:
                 user_message=user_message,
                 temperature=self.temperature,
             )
+            total_tokens = provider.get_last_usage().get("total_tokens")
         except Exception as exc:
             raw_text = f"[ERROR: {exc}]"
 
@@ -352,6 +354,7 @@ class Agent:
             cycle=packet.cycle,
             contribution=contribution,
             raw_response=raw_text,
+            total_tokens=total_tokens,
         )
 
     def stream(self, packet: ContextPacket, system_prompt: str, user_message: str):
@@ -365,6 +368,7 @@ class Agent:
         self._last_system_prompt = system_prompt
         self._last_user_message = user_message
         self._stream_chunks: list[str] = []
+        self._stream_total_tokens: int | None = None
         try:
             provider = get_provider(self.provider)
             for chunk in provider.stream(
@@ -375,6 +379,7 @@ class Agent:
             ):
                 self._stream_chunks.append(chunk)
                 yield chunk
+            self._stream_total_tokens = provider.get_last_usage().get("total_tokens")
         except Exception as exc:
             err = f"[ERROR: {exc}]"
             self._stream_chunks.append(err)
@@ -389,4 +394,5 @@ class Agent:
             cycle=packet.cycle,
             contribution=contribution,
             raw_response=raw_text,
+            total_tokens=getattr(self, "_stream_total_tokens", None),
         )

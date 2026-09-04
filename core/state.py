@@ -37,6 +37,9 @@ class AgentOutput:
         ECUs earned this turn (set after Phase 2).
     raw_response : str | None
     timestamp : str
+    total_tokens : int | None
+        LLM tokens spent producing this contribution (input + output).
+        None for a human-written contribution, since no LLM call was made.
     """
     agent_name: str
     cycle: int
@@ -46,6 +49,7 @@ class AgentOutput:
     ecu_earned: float | None = None
     raw_response: str | None = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    total_tokens: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +61,7 @@ class AgentOutput:
             "ecu_earned": self.ecu_earned,
             "raw_response": self.raw_response,
             "timestamp": self.timestamp,
+            "total_tokens": self.total_tokens,
         }
 
 

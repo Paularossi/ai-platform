@@ -64,6 +64,18 @@ API_KEY_ENV_VARS: dict[str, str] = {
 class LLMProvider:
     """Abstract base. Subclasses must implement complete() and stream()."""
 
+    def __init__(self):
+        # Usage from the most recent complete()/stream() call — {input_tokens,
+        # output_tokens, total_tokens}, all None until a call has completed.
+        # Streaming SDKs surface usage differently per provider (see each
+        # subclass's stream()), so this is populated at different points.
+        self.last_usage: dict[str, int | None] = {
+            "input_tokens": None, "output_tokens": None, "total_tokens": None,
+        }
+
+    def get_last_usage(self) -> dict[str, int | None]:
+        return dict(self.last_usage)
+
     def complete(
         self,
         model: str,
@@ -92,6 +104,7 @@ class LLMProvider:
 
 class OpenAIProvider(LLMProvider):
     def __init__(self):
+        super().__init__()
         self._client = None
 
     def _get_client(self):
@@ -111,6 +124,12 @@ class OpenAIProvider(LLMProvider):
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        if response.usage:
+            self.last_usage = {
+                "input_tokens": response.usage.prompt_tokens,
+                "output_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
         return response.choices[0].message.content or ""
 
     def stream(self, model, system_prompt, user_message,
@@ -124,8 +143,15 @@ class OpenAIProvider(LLMProvider):
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            stream_options={"include_usage": True},
         )
         for chunk in response:
+            if chunk.usage:
+                self.last_usage = {
+                    "input_tokens": chunk.usage.prompt_tokens,
+                    "output_tokens": chunk.usage.completion_tokens,
+                    "total_tokens": chunk.usage.total_tokens,
+                }
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta.content
@@ -139,6 +165,7 @@ class OpenAIProvider(LLMProvider):
 
 class AnthropicProvider(LLMProvider):
     def __init__(self):
+        super().__init__()
         self._client = None
 
     def _get_client(self):
@@ -156,6 +183,12 @@ class AnthropicProvider(LLMProvider):
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        if response.usage:
+            self.last_usage = {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+                "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
+            }
         return response.content[0].text if response.content else ""
 
     def stream(self, model, system_prompt, user_message,
@@ -169,6 +202,15 @@ class AnthropicProvider(LLMProvider):
         ) as stream:
             for text in stream.text_stream:
                 yield text
+            # Usage isn't available until the stream is fully drained —
+            # get_final_message() blocks until then and carries it.
+            final = stream.get_final_message()
+            if final.usage:
+                self.last_usage = {
+                    "input_tokens": final.usage.input_tokens,
+                    "output_tokens": final.usage.output_tokens,
+                    "total_tokens": final.usage.input_tokens + final.usage.output_tokens,
+                }
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +219,7 @@ class AnthropicProvider(LLMProvider):
 
 class GoogleProvider(LLMProvider):
     def __init__(self):
+        super().__init__()
         self._client = None
 
     def _get_client(self):
@@ -239,6 +282,14 @@ class GoogleProvider(LLMProvider):
         # Extract text robustly — response.text can be None/empty when the
         # response is blocked. Go via candidates for a reliable path.
         # content can be None (SAFETY block) → accessing .parts raises TypeError.
+        usage = getattr(response, "usage_metadata", None)
+        if usage:
+            self.last_usage = {
+                "input_tokens": usage.prompt_token_count,
+                "output_tokens": usage.candidates_token_count,
+                "total_tokens": usage.total_token_count,
+            }
+
         try:
             text = response.candidates[0].content.parts[0].text
             if text:
@@ -276,6 +327,16 @@ class GoogleProvider(LLMProvider):
                 contents=user_message,
                 config=config,
             ):
+                # usage_metadata is present on every chunk but only reaches
+                # its final totals on the last one — later chunks just
+                # overwrite last_usage until it settles there.
+                usage = getattr(chunk, "usage_metadata", None)
+                if usage:
+                    self.last_usage = {
+                        "input_tokens": usage.prompt_token_count,
+                        "output_tokens": usage.candidates_token_count,
+                        "total_tokens": usage.total_token_count,
+                    }
                 if chunk.text:
                     yield chunk.text
         except Exception as exc:

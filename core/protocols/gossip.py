@@ -118,6 +118,7 @@ class GossipProtocol:
                         )
                     output = agent.finalize_stream(packet)
                 hub.submit(output)
+                hub.add_tokens(output.total_tokens)
                 round_outputs.append(output)
                 edited = (system_prompt, user_message) != (orig_system_prompt, orig_user_message)
                 hub.log_prompt(
@@ -199,7 +200,8 @@ class GossipProtocol:
                 )
                 try:
                     pr_kwargs = {"json_mode": True} if agent.provider == "Google" else {}
-                    raw = get_provider(agent.provider).complete(
+                    pr_provider = get_provider(agent.provider)
+                    raw = pr_provider.complete(
                         model=agent.model,
                         system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
                         user_message=prompt,
@@ -207,6 +209,7 @@ class GossipProtocol:
                         temperature=agent.temperature,
                         **pr_kwargs,
                     )
+                    hub.add_tokens(pr_provider.get_last_usage().get("total_tokens"))
                 except Exception as exc:
                     raw = f"[ERROR: {exc}]"
                 hub.log_prompt(cycle_idx, agent.name, "peer_review", prompt=prompt, response=raw)

@@ -451,9 +451,9 @@ with main_col:
             st.session_state.ecu_coalition_threshold = float(st.session_state.experiment_config.get("ecu", {}).get("coalition_threshold", 0.6))
 
         st.session_state.ecu_enabled = st.toggle(
-            "Enable ECU scoring",
+            "Enable peer review",
             value=st.session_state.ecu_enabled,
-            help="When enabled, agents score each other after each round and ECU balances are updated.",
+            help="Agents score each other's contributions after each round; ECU balances are derived from those scores automatically.",
         )
 
         if st.session_state.ecu_enabled:

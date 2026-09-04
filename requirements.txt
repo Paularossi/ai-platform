@@ -4,3 +4,4 @@ openai>=2.29
 streamlit>=1.55
 pandas>=2.3
 python-dotenv>=1.2
+psycopg2-binary>=2.9

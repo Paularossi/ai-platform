@@ -24,6 +24,31 @@ st.caption("A configurable platform for studying multi-agent AI interaction, con
 
 st.divider()
 
+student_id = st.text_input(
+    "Student ID",
+    value=st.session_state.get("student_id", ""),
+    placeholder="e.g. i6123456",
+    key="student_id_input",
+    help="Identifies your debates and tracks your usage.",
+)
+st.session_state.student_id = student_id.strip()
+if not st.session_state.student_id:
+    st.warning("Enter your student ID to continue.")
+else:
+    try:
+        from core.db import COURSE_TOKEN_QUOTA, ensure_schema, get_total_token_usage
+        ensure_schema()
+        used = get_total_token_usage(st.session_state.student_id)
+        st.progress(min(used / COURSE_TOKEN_QUOTA, 1.0))
+        st.caption(f"Usage this course: {used:,} / {COURSE_TOKEN_QUOTA:,} tokens")
+        if used >= COURSE_TOKEN_QUOTA:
+            st.warning("You've used your full course quota. You can still run debates.")
+    except Exception:
+        # A student not yet in the database shows as 0 usage
+        pass
+
+st.divider()
+
 left, right = st.columns(2, gap="large")
 
 with left:
@@ -47,7 +72,10 @@ with left:
             key="main_author",
         )
         st.write("")
-        if st.button("→ Start", type="primary", use_container_width=True):
+        if st.button(
+            "→ Start", type="primary", use_container_width=True,
+            disabled=not st.session_state.student_id,
+        ):
             clear_experiment_state()
             st.session_state.experiment_config = {
                 "overview": {"name": name_input, "author": author_input},
@@ -93,7 +121,10 @@ with right:
                     icon="📋",
                 )
 
-                if st.button("→ Load & review", type="primary", use_container_width=True):
+                if st.button(
+                    "→ Load & review", type="primary", use_container_width=True,
+                    disabled=not st.session_state.student_id,
+                ):
                     restore_draft(loaded)
                     st.switch_page("pages/4_Review.py")
 

@@ -127,6 +127,7 @@ class CommunicationHub:
         self.originator_name: str | None = None
         self.originator_contribution: str | None = None
         self.converged: bool = False
+        self._total_tokens: int = 0  # LLM tokens spent so far (contributions + peer review)
 
     # ------------------------------------------------------------------
     # Core interface used by the protocol
@@ -252,6 +253,15 @@ class CommunicationHub:
     def num_submissions(self) -> int:
         return len(self._log)
 
+    def add_tokens(self, n: int | None) -> None:
+        """Add to the running token total. """
+        if n:
+            self._total_tokens += n
+
+    @property
+    def total_tokens(self) -> int:
+        return self._total_tokens
+
     def log_prompt(self, cycle: int, agent_name: str, phase: str,
                    prompt: str, response: str = "", original_prompt: str | None = None) -> None:
         """
@@ -295,6 +305,7 @@ class CommunicationHub:
             "log": [o.to_dict() for o in self._log],
             "peer_review_log": [p.to_dict() for p in self._peer_review_log],
             "prompt_log": self._prompt_log,
+            "total_tokens": self._total_tokens,
         }
         if self.ledger:
             d["ecu"] = self.ledger.to_dict()

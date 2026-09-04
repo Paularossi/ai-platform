@@ -179,6 +179,32 @@ else:
 
 # ── Outcome + downloads (shared by both run paths) ────────────────────────────
 
+def _sync_debate_to_db(result: dict, experiment_cfg: dict) -> None:
+    """
+    Save (or, on a later call, update) this debate in the shared Supabase
+    log. Called after the outcome or the reflection is saved locally, so
+    the DB always reflects whatever's currently in `result`.
+    """
+    student_id = st.session_state.get("student_id", "").strip()
+    if not student_id:
+        return
+    try:
+        from core.db import ensure_schema, save_debate, update_debate_fields
+        ensure_schema()
+        if "_debate_id" not in result:
+            result["_debate_id"] = save_debate(result, experiment_cfg, student_id)
+        else:
+            outcome = result.get("outcome") or {}
+            update_debate_fields(
+                result["_debate_id"],
+                outcome_label=outcome.get("label"),
+                outcome_notes=outcome.get("notes"),
+                reflection=result.get("reflection"),
+            )
+    except Exception as exc:
+        st.caption(f"Note: this debate wasn't saved to the shared log ({exc}).")
+
+
 def _render_outcome_and_downloads(results: list[dict], experiment_cfg: dict) -> None:
     result = results[0]
     saved_outcome = result.get("outcome")
@@ -213,6 +239,7 @@ def _render_outcome_and_downloads(results: list[dict], experiment_cfg: dict) -> 
     if st.button(save_label, type="primary" if not saved_outcome else "secondary"):
         results[0]["outcome"] = {"label": outcome_label, "notes": outcome_notes}
         st.session_state["run_results"] = results
+        _sync_debate_to_db(results[0], experiment_cfg)
         st.toast("Outcome saved.")
         st.rerun()
 
@@ -231,6 +258,7 @@ def _render_outcome_and_downloads(results: list[dict], experiment_cfg: dict) -> 
     if st.button("💾 Update reflection" if saved_reflection else "💾 Save reflection"):
         results[0]["reflection"] = reflection_text
         st.session_state["run_results"] = results
+        _sync_debate_to_db(results[0], experiment_cfg)
         st.toast("Reflection saved.")
         st.rerun()
 
@@ -268,16 +296,19 @@ def _render_outcome_and_downloads(results: list[dict], experiment_cfg: dict) -> 
 
 
 def _show_run_summary(hub, elapsed: float, show_converged: bool = True) -> None:
+    # Tokens spent on LLM calls this debate (contributions + peer review)
     if show_converged:
-        scol1, scol2, scol3 = st.columns(3)
+        scol1, scol2, scol3, scol4 = st.columns(4)
         scol1.metric("Turns", hub.num_submissions)
         scol2.metric("Converged", "Yes" if hub.converged else "No")
         scol3.metric("Time", f"{elapsed:.1f}s")
+        scol4.metric("Tokens", f"{hub.total_tokens:,}")
     else:
         # Manual mode: the user decides when to stop
-        scol1, scol2 = st.columns(2)
+        scol1, scol2, scol3 = st.columns(3)
         scol1.metric("Turns", hub.num_submissions)
         scol2.metric("Time", f"{elapsed:.1f}s")
+        scol3.metric("Tokens", f"{hub.total_tokens:,}")
 
     if hub.ecu_balances:
         bal_cols = st.columns(len(hub.ecu_balances))
