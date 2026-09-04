@@ -36,14 +36,20 @@ def init_state():
     instr = cfg.get("instructions", {})
     task = cfg.get("task", {})
 
-    if "task_description" not in st.session_state:
+    # A freshly loaded draft re-syncs these even if the keys already exist
+    # from an earlier visit to this page
+    reload_from_draft = st.session_state.get("_draft_loaded_token") != st.session_state.get("_instructions_synced_token")
+
+    if "task_description" not in st.session_state or reload_from_draft:
         st.session_state.task_description = task.get("description", "")
-    if "base_instructions" not in st.session_state:
+    if "base_instructions" not in st.session_state or reload_from_draft:
         st.session_state.base_instructions = instr.get("base_instructions", "")
-    if "guideline_notes" not in st.session_state:
+    if "guideline_notes" not in st.session_state or reload_from_draft:
         st.session_state.guideline_notes = instr.get("guideline_notes", "")
-    if "agent_prompt_overrides" not in st.session_state:
+    if "agent_prompt_overrides" not in st.session_state or reload_from_draft:
         st.session_state.agent_prompt_overrides = cfg.get("agent_prompt_overrides", {})
+
+    st.session_state["_instructions_synced_token"] = st.session_state.get("_draft_loaded_token")
 
 
 def sync_to_config():

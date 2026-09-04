@@ -70,3 +70,6 @@ def restore_draft(loaded: dict) -> None:
 
     ds = loaded.get("dataset", {})
     st.session_state.column_mapping = ds.get("column_mapping", {})
+
+    # Every page's init_state() knows a draft was just loaded and re-syncs its widget-backed session_state keys
+    st.session_state["_draft_loaded_token"] = st.session_state.get("_draft_loaded_token", 0) + 1

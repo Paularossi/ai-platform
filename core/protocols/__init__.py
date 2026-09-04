@@ -16,7 +16,7 @@ from core.hub import ContextPacket
 from core.state import AgentOutput
 
 
-def build_ecu_info_str(hub, agent_name: str) -> str:
+def build_ecu_info_str(hub, cycle: int, agent_name: str) -> str:
     """
     Build the ECU context string for the peer review prompt.
     Returns an empty string under the opaque condition.
@@ -55,7 +55,7 @@ class RunEvent:
     kind == "stream_chunk"  : one piece of an agent's response, as it's
                               generated — zero or more of these are emitted
                               between an agent's "dispatch" and "submission"
-                              for a real LLM call, so it appears as a live typing effect. d
+                              for a real LLM call, so it appears as a live typing effect.
     kind == "submission"   : agent returned output, hub stored it
     kind == "aggregate"    : crowd round aggregate computed
     kind == "peer_review"  : one agent's Phase 2 peer review completed

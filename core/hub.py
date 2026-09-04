@@ -122,7 +122,7 @@ class CommunicationHub:
 
         self._log: list[AgentOutput] = []
         self._peer_review_log: list[PeerReviewOutput] = []
-        self._prompt_log: list[dict] = []  # {cycle, agent, phase, prompt, response}
+        self._prompt_log: list[dict] = []  # {cycle, agent, phase, prompt, response, original_prompt}
         self._current_contribution: str | None = None
         self.originator_name: str | None = None
         self.originator_contribution: str | None = None
@@ -253,14 +253,21 @@ class CommunicationHub:
         return len(self._log)
 
     def log_prompt(self, cycle: int, agent_name: str, phase: str,
-                   prompt: str, response: str = "") -> None:
-        """Record a prompt sent to an agent for debugging."""
+                   prompt: str, response: str = "", original_prompt: str | None = None) -> None:
+        """
+        Record a prompt sent to an agent, for debugging and for the full log.
+
+        original_prompt is set only in Manual (step-through) mode, and only
+        when the auto-generated text is actually changed, it's kept alongside 
+        the final one so the full log shows both versions.
+        """
         self._prompt_log.append({
             "cycle": cycle,
             "agent": agent_name,
             "phase": phase,  # "contribution" or "peer_review"
             "prompt": prompt,
             "response": response,
+            "original_prompt": original_prompt,
         })
 
     @property

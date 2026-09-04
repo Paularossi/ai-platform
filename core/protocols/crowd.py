@@ -79,6 +79,7 @@ class CrowdProtocol:
 
             for agent, packet in packets:
                 system_prompt, user_message = agent.build_prompt(packet)
+                orig_system_prompt, orig_user_message = system_prompt, user_message
                 injected = yield RunEvent(
                     kind="dispatch",
                     cycle=cycle_idx,
@@ -113,9 +114,15 @@ class CrowdProtocol:
                     output = agent.finalize_stream(packet)
                 hub.submit(output)
                 round_outputs.append(output)
-                hub.log_prompt(cycle_idx, agent.name, "contribution",
-                               prompt=f"[SYSTEM]\n{agent._last_system_prompt}\n\n[USER]\n{agent._last_user_message}",
-                               response=output.raw_response or "")
+                edited = (system_prompt, user_message) != (orig_system_prompt, orig_user_message)
+                hub.log_prompt(
+                    cycle_idx, agent.name, "contribution",
+                    prompt=f"[SYSTEM]\n{agent._last_system_prompt}\n\n[USER]\n{agent._last_user_message}",
+                    response=output.raw_response or "",
+                    original_prompt=(
+                        f"[SYSTEM]\n{orig_system_prompt}\n\n[USER]\n{orig_user_message}" if edited else None
+                    ),
+                )
                 yield RunEvent(
                     kind="submission",
                     cycle=cycle_idx,
@@ -157,6 +164,11 @@ class CrowdProtocol:
         agent_histories = hub.build_review_history(cycle_idx)
 
         for agent in self.agents:
+            # Reviewing is deferred for human agents (see Agent.is_human) —
+            # they're still fully reviewable by everyone else since
+            # all_contributions treats their text like any other agent's.
+            if agent.is_human:
+                continue
             ecu_info = build_ecu_info_str(hub, cycle_idx, agent.name)
             if self.peer_reviewer.dry_run:
                 review = self.peer_reviewer.parse(

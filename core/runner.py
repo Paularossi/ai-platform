@@ -14,7 +14,7 @@ everything needed to build a runnable experiment item:
     build_item_data       → dict  (from a DataFrame row + column mapping)
     collect_result        → dict  (serialisable result from a completed hub)
     results_to_df         → pd.DataFrame  (flatten a list of result dicts)
-    build_transcript_md   → str  (a readable, student-facing markdown transcript)
+    build_transcript_md   → str  (a readable, human-facing markdown transcript)
 """
 
 from __future__ import annotations
@@ -326,6 +326,13 @@ def build_transcript_md(result: dict, cfg: dict) -> str:
         if outcome.get("notes"):
             lines.append("")
             lines.append(outcome["notes"])
+        lines.append("")
+
+    reflection = result.get("reflection")
+    if reflection:
+        lines.append("## Reflection")
+        lines.append("")
+        lines.append(reflection)
         lines.append("")
 
     return "\n".join(lines)

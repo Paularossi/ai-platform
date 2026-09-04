@@ -16,7 +16,6 @@ from typing import Any
 from core.hub import ContextPacket
 from core.state import AgentOutput
 from core.providers import get_provider
-
 # Prompt builders
 # ---------------------------------------------------------------------------
 
@@ -256,6 +255,9 @@ class Agent:
         self.provider: str = config.get("provider", "OpenAI")
         self.model: str = config.get("model", "gpt-4o")
         self.temperature: float = float(config.get("temperature", 0.0))
+        # A human-controlled agent uses send(human_input=...) to send its contribution. 
+        # Protocols and peer review check this to skip API calls for it.
+        self.is_human: bool = self.provider == "Human"
 
         raw_role = config.get("role", "Participant")
         custom_role_text = config.get("custom_role", "").strip()

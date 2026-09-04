@@ -122,7 +122,9 @@ with st.container(border=True):
     st.subheader("Run configuration")
 
     from core.providers import API_KEY_ENV_VARS, reset_provider
-    used_providers = sorted({a.get("provider", "OpenAI") for a in agents_cfg})
+    used_providers = sorted({
+        a.get("provider", "OpenAI") for a in agents_cfg if a.get("provider") != "Human"
+    })
     api_keys: dict[str, str] = {}
     for provider in used_providers:
         env_var = API_KEY_ENV_VARS.get(provider, f"{provider.upper()}_API_KEY")
@@ -138,9 +140,23 @@ with st.container(border=True):
 
 proto = cfg.get("protocol", {})
 # Run mode is decided upfront on Agent Setup, not re-toggled here
-manual_mode = proto.get("run_mode", "Automatic") == "Manual (step-through)"
+# A human agent forces the run to pause for its own turns regardless of run mode
+human_agent_name = next(
+    (a.get("name") for a in agents_cfg if a.get("provider") == "Human"), None
+)
+has_human = human_agent_name is not None
+# A human agent always runs in Manual mode: there's no auto-computed stopping
+# condition to fall back on, the student decides when the debate is over and
+# what its outcome was, same as any other manual run.
+manual_mode = proto.get("run_mode", "Automatic") == "Manual (step-through)" or has_human
 
-if manual_mode:
+if manual_mode and has_human:
+    st.caption(
+        f"**Manual (step-through)** run, with **{human_agent_name}** played by you — "
+        "pause before every turn: yours to write, others to review and approve. "
+        "You decide when the debate ends."
+    )
+elif manual_mode:
     st.caption(
         "**Manual (step-through)** run — pause before every agent turn to review and "
         "edit the prompt, then approve it to send. You decide when the debate ends."
@@ -183,6 +199,9 @@ def _render_outcome_and_downloads(results: list[dict], experiment_cfg: dict) -> 
             format_func=lambda x: OUTCOME_DESCRIPTIONS.get(x, x),
             key="outcome_label_select",
         )
+        st.caption(
+            "These four types describe how a deliberation can settle — all are valid outcomes."
+        )
     with oc2:
         outcome_notes = st.text_area(
             "Notes / justification (optional)",
@@ -195,6 +214,24 @@ def _render_outcome_and_downloads(results: list[dict], experiment_cfg: dict) -> 
         results[0]["outcome"] = {"label": outcome_label, "notes": outcome_notes}
         st.session_state["run_results"] = results
         st.toast("Outcome saved.")
+        st.rerun()
+
+    st.divider()
+    st.subheader("Reflection")
+    st.caption(
+        "Your own read on why the debate settled this way — saved alongside the transcript."
+    )
+    saved_reflection = result.get("reflection", "")
+    reflection_text = st.text_area(
+        "Reflection (optional)",
+        value=saved_reflection,
+        height=120,
+        key="reflection_input",
+    )
+    if st.button("💾 Update reflection" if saved_reflection else "💾 Save reflection"):
+        results[0]["reflection"] = reflection_text
+        st.session_state["run_results"] = results
+        st.toast("Reflection saved.")
         st.rerun()
 
     st.divider()
@@ -237,6 +274,7 @@ def _show_run_summary(hub, elapsed: float, show_converged: bool = True) -> None:
         scol2.metric("Converged", "Yes" if hub.converged else "No")
         scol3.metric("Time", f"{elapsed:.1f}s")
     else:
+        # Manual mode: the user decides when to stop
         scol1, scol2 = st.columns(2)
         scol1.metric("Turns", hub.num_submissions)
         scol2.metric("Time", f"{elapsed:.1f}s")
@@ -264,7 +302,8 @@ def _show_nav_buttons():
                 "base_instructions", "guideline_notes", "agent_prompt_overrides",
                 "agents", "num_agents", "interaction_setting", "run_mode",
                 "visibility_mode", "review_depth", "order_type", "custom_order", "max_cycles",
-                "stopping_rule", "initializer_agent", "exp_name", "author", "task_description",
+                "stopping_rule", "initializer_agent",
+                "exp_name", "author", "task_description",
                 "dataset_df", "column_mapping", "run_results", "manual_run",
                 "ecu_enabled", "ecu_info_condition", "ecu_self_assessment",
                 "ecu_coalition_threshold", "ecu_dimensions",
@@ -394,6 +433,13 @@ def _advance_manual_run(resume_value: dict | None = None) -> None:
     state = st.session_state["manual_run"]
     gen = state["gen"]
     hub = state["hub"]
+    auto_ai = state.get("auto_ai", False)
+    human_agent_name = state.get("human_agent_name")
+    # Render each finished entry to the page as soon as it's produced, instead
+    # of only appending to `feed` for the next rerun to draw — otherwise a
+    # human's own submission (no stream_chunk to render it) stays invisible
+    # while the next AI turn starts streaming right after it.
+    last_cycle = state["feed"][-1]["cycle"] if state["feed"] else None
     first = True
     while True:
         try:
@@ -404,32 +450,55 @@ def _advance_manual_run(resume_value: dict | None = None) -> None:
             return
         first = False
         if event.kind == "dispatch":
-            state["pending"] = event
-            return
+            if not auto_ai or event.agent_name == human_agent_name:
+                state["pending"] = event
+                return
+            # auto_ai: AI turn s play it straight through, same as a plain Automatic run
+            continue
+        if event.cycle != last_cycle:
+            st.markdown(f"### Round {event.cycle + 1}")
+            last_cycle = event.cycle
         if event.kind == "stream_chunk":
             # Live-render this turn as it's generated; it then becomes a normal static entry in `feed`,
             # same as every other turn, once the response is complete.
             event = _drain_stream_and_render(gen, event)
+            entry = _feed_entry_from_event(event, hub)
+            if entry:
+                state["feed"].append(entry)
+            continue
         entry = _feed_entry_from_event(event, hub)
         if entry:
+            _render_feed_entry(entry)
             state["feed"].append(entry)
 
 
-def _start_manual_run(cfg, agents, agent_names, peer_reviewer, item_id, item_data, review_depth) -> None:
-    # No automatic stopping rule and no round cap. "Stop here" ends the debate. 
-    # See _MANUAL_MAX_CYCLES.
-    manual_cfg = {
-        **cfg,
-        "protocol": {**proto, "max_cycles": _MANUAL_MAX_CYCLES, "stopping_rule": "Max cycles"},
-    }
-    item_ledger, item_coalition, item_orchestrator = build_ecu_components(manual_cfg, agent_names, review_depth)
+def _start_manual_run(cfg, agents, agent_names, peer_reviewer, item_id, item_data, review_depth,
+                       auto_ai: bool = False, human_agent_name: str | None = None) -> None:
+    """
+    auto_ai=False (true Manual mode): self-paced, pause before every turn —
+    no automatic stopping rule and no round cap, only "Stop here" ends the
+    debate. See _MANUAL_MAX_CYCLES.
+
+    auto_ai=True (Automatic mode with a human agent aboard): keep the real
+    stopping rule and cycle cap — the run only pauses for human_agent_name's
+    own turns, everything else plays straight through same as a plain
+    Automatic run.
+    """
+    if auto_ai:
+        run_cfg = cfg
+    else:
+        run_cfg = {
+            **cfg,
+            "protocol": {**proto, "max_cycles": _MANUAL_MAX_CYCLES, "stopping_rule": "Max cycles"},
+        }
+    item_ledger, item_coalition, item_orchestrator = build_ecu_components(run_cfg, agent_names, review_depth)
     protocol = build_protocol(
-        agents, manual_cfg,
+        agents, run_cfg,
         peer_reviewer=peer_reviewer,
         coalition_tracker=item_coalition,
         orchestrator=item_orchestrator,
     )
-    hub = build_hub(item_id, item_data, manual_cfg, agent_names, item_ledger)
+    hub = build_hub(item_id, item_data, run_cfg, agent_names, item_ledger)
 
     st.session_state["manual_run"] = {
         "gen": protocol.run_iter(hub),
@@ -442,6 +511,8 @@ def _start_manual_run(cfg, agents, agent_names, peer_reviewer, item_id, item_dat
         "pending": None,
         "finished": False,
         "t_start": time.time(),
+        "auto_ai": auto_ai,
+        "human_agent_name": human_agent_name,
     }
     _advance_manual_run()
 
@@ -449,6 +520,7 @@ def _start_manual_run(cfg, agents, agent_names, peer_reviewer, item_id, item_dat
 def _render_manual_run() -> None:
     state = st.session_state["manual_run"]
     hub = state["hub"]
+    human_agent_name = state.get("human_agent_name")
 
     st.divider()
     last_cycle = None
@@ -460,9 +532,9 @@ def _render_manual_run() -> None:
 
     if state["finished"]:
         elapsed = time.time() - state["t_start"]
-        _show_run_summary(hub, elapsed, show_converged=False)
-        # Build the result once, the first time this branch is reached after
-        # finishing. On every later rerun run_results is already present.
+        # Pure Manual mode is self-paced ("Stop here" decides). Automatic mode with a
+        # human aboard still ends via a stopping rule, same as a plain Automatic run.
+        _show_run_summary(hub, elapsed, show_converged=state.get("auto_ai", False))
         if "run_results" not in st.session_state:
             result = collect_result(
                 hub, state["item_ledger"], state["item_coalition"], state["item_orchestrator"]
@@ -471,36 +543,69 @@ def _render_manual_run() -> None:
         return
 
     pending = state["pending"]
-
-    # The prompt boxes disappear right as the response starts streaming in
+    is_human_turn = human_agent_name is not None and pending.agent_name == human_agent_name
+    
     pending_box = st.empty()
     with pending_box.container():
-        st.markdown(f"### ⏸ Paused — **{pending.agent_name}**'s turn  ·  Round {pending.cycle + 1}")
-        st.caption("Review and edit the exact prompt about to be sent, then approve to send it.")
-
         key_prefix = f"manual_{pending.cycle}_{pending.agent_name}"
-        system_edit = st.text_area(
-            "System prompt", value=pending.prompt["system"], height=150, key=f"{key_prefix}_sys"
-        )
-        user_edit = st.text_area(
-            "User message", value=pending.prompt["user"], height=200, key=f"{key_prefix}_user"
-        )
 
-        col_a, col_b = st.columns(2)
-        with col_a:
-            approve_clicked = st.button(
-                "✅ Approve & send", type="primary", key=f"{key_prefix}_approve",
-                use_container_width=True,
+        if is_human_turn:
+            st.markdown(f"### ⏸ Your turn — **{pending.agent_name}**  ·  Round {pending.cycle + 1}")
+            st.caption("Write your contribution for this round, then submit it.")
+
+            history = pending.packet.visible_history
+            if history:
+                with st.expander("What's been said so far", expanded=True):
+                    for h in history:
+                        st.markdown(f"**{h.agent_name}** (round {h.cycle + 1}):")
+                        st.markdown(str(h.contribution) if h.contribution else "*(empty)*")
+            else:
+                st.caption("No prior context is visible for this turn — you're contributing blind.")
+
+            human_text = st.text_area(
+                "Your contribution", height=200, key=f"{key_prefix}_human_input",
+                placeholder="Write what you contribute to the debate this round.",
             )
-        with col_b:
-            stop_clicked = st.button(
-                "⏹ Stop here", key=f"{key_prefix}_stop", use_container_width=True,
-                help="End the debate now. Everything submitted so far is kept; this pending turn is not sent.",
+            col_a, col_b = st.columns(2)
+            with col_a:
+                submit_clicked = st.button(
+                    "✅ Submit", type="primary", key=f"{key_prefix}_submit",
+                    use_container_width=True, disabled=not human_text.strip(),
+                )
+            with col_b:
+                stop_clicked = st.button(
+                    "⏹ Stop here", key=f"{key_prefix}_stop", use_container_width=True,
+                    help="End the debate now instead of submitting this turn.",
+                )
+        else:
+            st.markdown(f"### ⏸ Paused — **{pending.agent_name}**'s turn  ·  Round {pending.cycle + 1}")
+            st.caption("Review and edit the exact prompt about to be sent, then approve to send it.")
+
+            system_edit = st.text_area(
+                "System prompt", value=pending.prompt["system"], height=150, key=f"{key_prefix}_sys"
+            )
+            user_edit = st.text_area(
+                "User message", value=pending.prompt["user"], height=200, key=f"{key_prefix}_user"
             )
 
-    if approve_clicked:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                submit_clicked = st.button(
+                    "✅ Approve & send", type="primary", key=f"{key_prefix}_approve",
+                    use_container_width=True,
+                )
+            with col_b:
+                stop_clicked = st.button(
+                    "⏹ Stop here", key=f"{key_prefix}_stop", use_container_width=True,
+                    help="End the debate now. Everything submitted so far is kept; this pending turn is not sent.",
+                )
+
+    if submit_clicked:
         pending_box.empty()
-        _advance_manual_run(resume_value={"system": system_edit, "user": user_edit})
+        if is_human_turn:
+            _advance_manual_run(resume_value={"human_input": human_text})
+        else:
+            _advance_manual_run(resume_value={"system": system_edit, "user": user_edit})
         st.rerun()
     if stop_clicked:
         hub.check_convergence()
@@ -509,7 +614,7 @@ def _render_manual_run() -> None:
         st.rerun()
 
 
-if manual_mode and "manual_run" in st.session_state:
+if (manual_mode or has_human) and "manual_run" in st.session_state:
     _render_manual_run()
     if not st.session_state["manual_run"]["finished"]:
         st.stop()
@@ -574,9 +679,12 @@ id_col = column_mapping.get("id", None)
 item_id = str(topic_row[id_col]) if id_col and id_col in df.columns else "topic"
 item_data = build_item_data(topic_row, column_mapping)
 
-if manual_mode:
+if manual_mode or has_human:
     peer_reviewer: PeerReviewRound | None = build_peer_reviewer(cfg, review_depth)
-    _start_manual_run(cfg, agents, agent_names, peer_reviewer, item_id, item_data, review_depth)
+    _start_manual_run(
+        cfg, agents, agent_names, peer_reviewer, item_id, item_data, review_depth,
+        auto_ai=not manual_mode, human_agent_name=human_agent_name,
+    )
     st.rerun()
 
 # ── Build the single run ──────────────────────────────────────────────────────

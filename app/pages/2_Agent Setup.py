@@ -46,14 +46,14 @@ def sync_agents_to_config():
     }
 
 
-def init_agent_state():
+def init_agent_state(reload_from_draft: bool = False):
     protocol = st.session_state.experiment_config.get("protocol", {})
     saved_agents = st.session_state.experiment_config.get("agents", [])
 
-    if "num_agents" not in st.session_state:
+    if "num_agents" not in st.session_state or reload_from_draft:
         st.session_state.num_agents = len(saved_agents) if saved_agents else 3
 
-    if "agents" not in st.session_state:
+    if "agents" not in st.session_state or reload_from_draft:
         if saved_agents:
             st.session_state.agents = saved_agents
         else:
@@ -84,31 +84,31 @@ def init_agent_state():
                 },
             ]
 
-    if "interaction_setting" not in st.session_state:
+    if "interaction_setting" not in st.session_state or reload_from_draft:
         st.session_state.interaction_setting = protocol.get("setting", "Simultaneous")
 
-    if "run_mode" not in st.session_state:
+    if "run_mode" not in st.session_state or reload_from_draft:
         st.session_state.run_mode = protocol.get("run_mode", "Automatic")
 
-    if "visibility_mode" not in st.session_state:
+    if "visibility_mode" not in st.session_state or reload_from_draft:
         st.session_state.visibility_mode = protocol.get("visibility_mode", "Previous round")
-        
-    if "review_depth" not in st.session_state:
+
+    if "review_depth" not in st.session_state or reload_from_draft:
         st.session_state.review_depth = protocol.get("review_depth", "Previous Round")
 
-    if "order_type" not in st.session_state:
+    if "order_type" not in st.session_state or reload_from_draft:
         st.session_state.order_type = protocol.get("order_type", "Fixed")
 
-    if "custom_order" not in st.session_state:
+    if "custom_order" not in st.session_state or reload_from_draft:
         st.session_state.custom_order = protocol.get("custom_order", [])
 
-    if "initializer_agent" not in st.session_state:
+    if "initializer_agent" not in st.session_state or reload_from_draft:
         st.session_state.initializer_agent = protocol.get("initializer_agent", "Agent 1")
 
-    if "max_cycles" not in st.session_state:
+    if "max_cycles" not in st.session_state or reload_from_draft:
         st.session_state.max_cycles = protocol.get("max_cycles", 5)
 
-    if "stopping_rule" not in st.session_state:
+    if "stopping_rule" not in st.session_state or reload_from_draft:
         st.session_state.stopping_rule = protocol.get("stopping_rule", "Either")
 
 
@@ -131,7 +131,11 @@ def sync_agents_to_count(n: int):
 
 
 init_agent_config()
-init_agent_state()
+# A freshly loaded draft re-syncs session_state below even if the keys already
+# exist from an earlier visit to this page.
+_reload_from_draft = st.session_state.get("_draft_loaded_token") != st.session_state.get("_agent_setup_synced_token")
+init_agent_state(_reload_from_draft)
+st.session_state["_agent_setup_synced_token"] = st.session_state.get("_draft_loaded_token")
 
 
 # ---------- sidebar ----------
@@ -165,17 +169,31 @@ with main_col:
                 ) if st.session_state.interaction_setting in ["Simultaneous", "Sequential"] else 0,
             )
         with c2:
-            st.session_state.run_mode = st.selectbox(
-                "Run mode",
-                ["Automatic", "Manual (step-through)"],
-                index=["Automatic", "Manual (step-through)"].index(st.session_state.run_mode),
-                help=(
-                    "Automatic plays the debate straight through using the stopping "
-                    "rule below. Manual pauses before every agent turn so you can "
-                    "review and edit the prompt, then approve it to send — you decide "
-                    "when the debate ends."
-                ),
+            has_human_agent = any(
+                st.session_state.get(f"agent_provider_{i}") == "Human" or a.get("provider") == "Human"
+                for i, a in enumerate(st.session_state.agents)
             )
+            if has_human_agent:
+                st.session_state.run_mode = "Manual (step-through)"
+                st.selectbox(
+                    "Run mode",
+                    ["Automatic", "Manual (step-through)"],
+                    index=1,
+                    disabled=True,
+                    help="Forced to Manual (step-through) — a Human agent is configured "
+                         "below, and a human turn always needs to pause for input.",
+                )
+            else:
+                st.session_state.run_mode = st.selectbox(
+                    "Run mode",
+                    ["Automatic", "Manual (step-through)"],
+                    index=["Automatic", "Manual (step-through)"].index(st.session_state.run_mode),
+                    help=(
+                        "Automatic plays the debate straight through using the stopping "
+                        "rule below. Manual pauses before every agent turn so you can "
+                        "review and edit the prompt, then approve it to send"
+                    ),
+                )
 
     with st.container(border=True):
         st.subheader("2. Agent roster")
@@ -208,7 +226,12 @@ with main_col:
                     )
                 with c2:
                     from core.providers import PROVIDERS, PROVIDER_MODELS
-                    provider_options = PROVIDERS
+                    # Only one agent can be "Human" at a time
+                    other_human_taken = any(
+                        st.session_state.agents[j].get("provider") == "Human"
+                        for j in range(st.session_state.num_agents) if j != i
+                    )
+                    provider_options = PROVIDERS if other_human_taken else PROVIDERS + ["Human"]
                     agent["provider"] = st.selectbox(
                         "Provider",
                         provider_options,
@@ -216,26 +239,44 @@ with main_col:
                         if agent["provider"] in provider_options else 0,
                         key=f"agent_provider_{i}",
                     )
+                is_human = agent["provider"] == "Human"
                 with c3:
-                    model_options = PROVIDER_MODELS.get(agent["provider"], [])
-                    # If stored model not in list keep it as free-text fallback
-                    if agent["model"] not in model_options:
-                        model_options = [agent["model"]] + model_options
-                    agent["model"] = st.selectbox(
-                        "Model",
-                        model_options,
-                        index=model_options.index(agent["model"]),
-                        key=f"agent_model_{i}",
-                    )
+                    if is_human:
+                        st.text_input("Model", value="— you'll write the contributions —",
+                                      disabled=True, key=f"agent_model_disabled_{i}")
+                        agent["model"] = ""
+                    else:
+                        model_options = PROVIDER_MODELS.get(agent["provider"], [])
+                        if not agent["model"]:
+                            # Switched away from "Human" so fall back to this provider's first model
+                            agent["model"] = model_options[0] if model_options else ""
+                        # If stored model not in list keep it as free-text fallback
+                        if agent["model"] not in model_options:
+                            model_options = [agent["model"]] + model_options
+                        agent["model"] = st.selectbox(
+                            "Model",
+                            model_options,
+                            index=model_options.index(agent["model"]),
+                            key=f"agent_model_{i}",
+                        )
                 with c4:
-                    agent["temperature"] = st.number_input(
-                        "Temperature",
-                        min_value=0.0,
-                        max_value=1.0,
-                        value=float(agent.get("temperature", 0.0)),
-                        step=0.01,
-                        key=f"agent_temperature_{i}",
-                        help="0 = deterministic. Higher values increase randomness. 1 = very random.",
+                    if is_human:
+                        agent["temperature"] = 0.0
+                    else:
+                        agent["temperature"] = st.number_input(
+                            "Temperature",
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=float(agent.get("temperature", 0.0)),
+                            step=0.01,
+                            key=f"agent_temperature_{i}",
+                            help="0 = deterministic. Higher values increase randomness. 1 = very random.",
+                        )
+                if is_human:
+                    st.caption(
+                        "You'll be prompted to write this agent's contribution yourself "
+                        "each round when the debate runs. It won't do peer review yet but "
+                        "it can still be reviewed by the other agents."
                     )
 
                 agent["custom_role"] = st.text_area(
@@ -391,7 +432,7 @@ with main_col:
             sys.path.insert(0, str(_ROOT))
         from core.ecu import DEFAULT_DIMENSIONS
 
-        if "ecu_dimensions" not in st.session_state:
+        if "ecu_dimensions" not in st.session_state or _reload_from_draft:
             saved = st.session_state.experiment_config.get("ecu", {})
             if saved.get("dimensions"):
                 st.session_state.ecu_dimensions = saved["dimensions"]
@@ -400,13 +441,13 @@ with main_col:
                     {"name": d["name"], "label": d["label"], "weight": 1.0, "sw_weight": 1.0}
                     for d in DEFAULT_DIMENSIONS
                 ]
-        if "ecu_enabled" not in st.session_state:
+        if "ecu_enabled" not in st.session_state or _reload_from_draft:
             st.session_state.ecu_enabled = st.session_state.experiment_config.get("ecu", {}).get("enabled", False)
-        if "ecu_info_condition" not in st.session_state:
+        if "ecu_info_condition" not in st.session_state or _reload_from_draft:
             st.session_state.ecu_info_condition = st.session_state.experiment_config.get("ecu", {}).get("info_condition", "opaque")
-        if "ecu_self_assessment" not in st.session_state:
+        if "ecu_self_assessment" not in st.session_state or _reload_from_draft:
             st.session_state.ecu_self_assessment = st.session_state.experiment_config.get("ecu", {}).get("include_self_assessment", False)
-        if "ecu_coalition_threshold" not in st.session_state:
+        if "ecu_coalition_threshold" not in st.session_state or _reload_from_draft:
             st.session_state.ecu_coalition_threshold = float(st.session_state.experiment_config.get("ecu", {}).get("coalition_threshold", 0.6))
 
         st.session_state.ecu_enabled = st.toggle(
@@ -458,11 +499,11 @@ with main_col:
                 "Social welfare is computed with fixed SW weights $w^{SW}$."
             )
 
-            if "ecu_orchestrator_enabled" not in st.session_state:
+            if "ecu_orchestrator_enabled" not in st.session_state or _reload_from_draft:
                 st.session_state.ecu_orchestrator_enabled = st.session_state.experiment_config.get("ecu", {}).get("orchestrator_enabled", False)
-            if "ecu_orchestrator_step_size" not in st.session_state:
+            if "ecu_orchestrator_step_size" not in st.session_state or _reload_from_draft:
                 st.session_state.ecu_orchestrator_step_size = float(st.session_state.experiment_config.get("ecu", {}).get("orchestrator_step_size", 0.1))
-            if "ecu_orchestrator_every" not in st.session_state:
+            if "ecu_orchestrator_every" not in st.session_state or _reload_from_draft:
                 st.session_state.ecu_orchestrator_every = int(st.session_state.experiment_config.get("ecu", {}).get("orchestrator_every", 2))
 
             st.session_state.ecu_orchestrator_enabled = st.toggle(
