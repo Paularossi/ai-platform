@@ -10,7 +10,10 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from components.utils import require_login
 from core.agent import _build_system_prompt
+
+require_login() # checks for valid student/tutor id
 
 
 st.sidebar.title("Experiment Builder")

@@ -8,7 +8,9 @@ _AMS = ZoneInfo("Europe/Amsterdam")
 
 import pandas as pd
 import streamlit as st
-from components.utils import restore_draft
+from components.utils import require_login, restore_draft
+
+require_login() # checks for valid student/tutor id
 
 
 st.sidebar.title("Experiment Builder")

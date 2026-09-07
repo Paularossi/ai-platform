@@ -24,28 +24,61 @@ st.caption("A configurable platform for studying multi-agent AI interaction, con
 
 st.divider()
 
-student_id = st.text_input(
-    "Student ID",
-    value=st.session_state.get("student_id", ""),
-    placeholder="e.g. i6123456",
-    key="student_id_input",
-    help="Identifies your debates and tracks your usage.",
-)
-st.session_state.student_id = student_id.strip()
-if not st.session_state.student_id:
-    st.warning("Enter your student ID to continue.")
-else:
-    try:
-        from core.db import COURSE_TOKEN_QUOTA, ensure_schema, get_total_token_usage
-        ensure_schema()
-        used = get_total_token_usage(st.session_state.student_id)
-        st.progress(min(used / COURSE_TOKEN_QUOTA, 1.0))
-        st.caption(f"Usage this course: {used:,} / {COURSE_TOKEN_QUOTA:,} tokens")
-        if used >= COURSE_TOKEN_QUOTA:
-            st.warning("You've used your full course quota. You can still run debates.")
-    except Exception:
-        # A student not yet in the database shows as 0 usage
-        pass
+st.session_state.setdefault("id_valid", False)
+st.session_state.setdefault("is_tutor", False)
+st.session_state.setdefault("tutorial_group", None)
+
+with st.form("login_form"):
+    student_id_input = st.text_input(
+        "Student or tutor ID",
+        value=st.session_state.get("student_id", ""),
+        placeholder="e.g. i6123456",
+        help="Checked against the course roster. Ask your tutor if yours isn't recognized.",
+    )
+    logged_in = st.form_submit_button("Log in")
+
+if logged_in:
+    st.session_state.student_id = student_id_input.strip()
+    st.session_state.id_valid = False
+    st.session_state.is_tutor = False
+    st.session_state.tutorial_group = None
+
+    sid = st.session_state.student_id
+    if not sid:
+        st.warning("Enter your student ID to continue.")
+    else:
+        try:
+            from core.db import ensure_schema, get_student_group, get_total_token_usage, is_tutor
+            ensure_schema()
+            if is_tutor(sid):
+                st.session_state.id_valid = True
+                st.session_state.is_tutor = True
+                st.info("Tutor ID recognized. The tutor dashboard is coming soon — for now you can also run debates below.")
+            else:
+                group = get_student_group(sid)
+                if group is not None:
+                    st.session_state.id_valid = True
+                    st.session_state.tutorial_group = group
+                else:
+                    st.error("ID not recognized. Check with your tutor if you think this is a mistake.")
+
+            if st.session_state.id_valid:
+                st.session_state.token_usage = get_total_token_usage(sid)
+                # rerun to show the tutor page
+                st.rerun()
+        except Exception as exc:
+            st.error(f"Can't verify your ID right now ({exc}). Please try again in a moment.")
+
+elif st.session_state.get("id_valid"):
+    st.success(f"Logged in as {st.session_state.student_id}" + (" (tutor)" if st.session_state.is_tutor else ""))
+
+if st.session_state.get("id_valid"):
+    from core.db import COURSE_TOKEN_QUOTA
+    used = st.session_state.get("token_usage", 0)
+    st.progress(min(used / COURSE_TOKEN_QUOTA, 1.0))
+    st.caption(f"Usage this course: {used:,} / {COURSE_TOKEN_QUOTA:,} tokens")
+    if used >= COURSE_TOKEN_QUOTA:
+        st.warning("You've used your full course quota. You can still run debates.")
 
 st.divider()
 
@@ -74,7 +107,7 @@ with left:
         st.write("")
         if st.button(
             "→ Start", type="primary", use_container_width=True,
-            disabled=not st.session_state.student_id,
+            disabled=not st.session_state.id_valid,
         ):
             clear_experiment_state()
             st.session_state.experiment_config = {
@@ -123,7 +156,7 @@ with right:
 
                 if st.button(
                     "→ Load & review", type="primary", use_container_width=True,
-                    disabled=not st.session_state.student_id,
+                    disabled=not st.session_state.id_valid,
                 ):
                     restore_draft(loaded)
                     st.switch_page("pages/4_Review.py")

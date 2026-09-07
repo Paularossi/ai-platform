@@ -29,12 +29,15 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from components.utils import require_login
 from core.agent import unescape_literal_whitespace
 from core.ecu import PeerReviewRound
 from core.runner import (
     build_agents, build_ecu_components, build_hub, build_item_data,
     build_peer_reviewer, build_protocol, build_transcript_md, collect_result,
 )
+
+require_login() # checks for valid student/tutor id
 
 _ACCENT = "#2E5945"
 
@@ -192,7 +195,11 @@ def _sync_debate_to_db(result: dict, experiment_cfg: dict) -> None:
         from core.db import ensure_schema, save_debate, update_debate_fields
         ensure_schema()
         if "_debate_id" not in result:
-            result["_debate_id"] = save_debate(result, experiment_cfg, student_id)
+            result["_debate_id"] = save_debate(
+                result, experiment_cfg, student_id,
+                tutorial_group=st.session_state.get("tutorial_group"),
+                logged_in_as_tutor=st.session_state.get("is_tutor", False),
+            )
         else:
             outcome = result.get("outcome") or {}
             update_debate_fields(

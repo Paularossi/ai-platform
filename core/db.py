@@ -3,18 +3,12 @@ core/db.py
 
 Persistent debate log for the multi-agent lab, backed by Supabase (Postgres).
 
-Six tables: who the student is, the debate itself (config + outcome +
-reflection + token total), who was on the panel, every contribution, every
-peer review, and every prompt sent (including edits a student made to it in
-Manual mode). Unlike the superagent_testing branch, full contribution text and 
-peer-review content are stored here, not just summaries.
+Eight tables: roster (valid student IDs by tutorial group), tutors, students
+debates, agents, contributions, peer_reviews, prompts.
 
-Auth is a bare student ID. There is no roster yet: any non-empty ID
-is accepted and gets its own row in `students` the first time it's seen.
-Validating against an actual roster later is a small addition on top of this.
-
-This module is only used by the live Streamlit app (app/pages/5_Run.py,
-saving on outcome-save - see _render_outcome_and_downloads).
+Auth checks a student ID against `roster` (see get_student_group) and a
+tutor ID against `tutors` (see is_tutor) - app/pages/1_Welcome.py blocks
+access on a login that matches neither.
 """
 
 from __future__ import annotations
@@ -30,6 +24,17 @@ import psycopg2.extras
 COURSE_TOKEN_QUOTA = 100_000
 
 _CREATE_TABLES = """
+CREATE TABLE IF NOT EXISTS roster (
+    student_id       TEXT PRIMARY KEY,
+    tutorial_group   INTEGER,
+    name             TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tutors (
+    tutor_id  TEXT PRIMARY KEY,
+    name      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS students (
     student_id  TEXT PRIMARY KEY,
     first_seen  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -58,7 +63,9 @@ CREATE TABLE IF NOT EXISTS debates (
     outcome_label      TEXT,
     outcome_notes      TEXT,
     reflection         TEXT,
-    total_tokens       INTEGER
+    total_tokens       INTEGER,
+    tutorial_group     INTEGER,
+    logged_in_as_tutor BOOLEAN
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -74,15 +81,16 @@ CREATE TABLE IF NOT EXISTS agents (
 );
 
 CREATE TABLE IF NOT EXISTS contributions (
-    id            BIGSERIAL PRIMARY KEY,
-    debate_id     BIGINT NOT NULL REFERENCES debates(id) ON DELETE CASCADE,
-    agent_name    TEXT,
-    cycle         INTEGER,
-    contribution  TEXT,
-    raw_response  TEXT,
-    total_tokens  INTEGER,
-    ecu_earned    DOUBLE PRECISION,
-    timestamp     TIMESTAMPTZ
+    id             BIGSERIAL PRIMARY KEY,
+    debate_id      BIGINT NOT NULL REFERENCES debates(id) ON DELETE CASCADE,
+    agent_name     TEXT,
+    cycle          INTEGER,
+    speaking_order INTEGER,
+    contribution   TEXT,
+    raw_response   TEXT,
+    total_tokens   INTEGER,
+    ecu_earned     DOUBLE PRECISION,
+    timestamp      TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS peer_reviews (
@@ -149,6 +157,67 @@ def ensure_schema() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Auth: roster + tutors
+# ---------------------------------------------------------------------------
+
+def get_student_group(student_id: str) -> int | None:
+    """
+    Return this student's tutorial group if student_id is on the roster, else None.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT tutorial_group FROM roster WHERE student_id = %s", (student_id,))
+            row = cur.fetchone()
+            return row[0] if row else None
+
+
+def is_tutor(tutor_id: str) -> bool:
+    """Return True if tutor_id is on the tutor list."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM tutors WHERE tutor_id = %s", (tutor_id,))
+            return cur.fetchone() is not None
+
+
+def load_roster(rows: list[tuple[str, int | None, str | None]]) -> None:
+    """
+    Bulk-load the roster: rows of (student_id, tutorial_group, name). Upserts,
+    so re-running with an updated list is safe. Used by scripts/load_roster.py.
+    """
+    if not rows:
+        return
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO roster (student_id, tutorial_group, name) VALUES %s
+                ON CONFLICT (student_id) DO UPDATE
+                    SET tutorial_group = EXCLUDED.tutorial_group, name = EXCLUDED.name
+                """,
+                rows,
+            )
+        conn.commit()
+
+
+def load_tutors(tutors: list[tuple[str, str | None]]) -> None:
+    """Bulk-load the tutor list: rows of (tutor_id, name). Upserts, so re-running is safe."""
+    if not tutors:
+        return
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO tutors (tutor_id, name) VALUES %s
+                ON CONFLICT (tutor_id) DO UPDATE SET name = EXCLUDED.name
+                """,
+                tutors,
+            )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
 # Students
 # ---------------------------------------------------------------------------
 
@@ -204,16 +273,17 @@ def update_debate_fields(debate_id: int, **fields: Any) -> None:
 # Saving a completed debate
 # ---------------------------------------------------------------------------
 
-def save_debate(result: dict[str, Any], cfg: dict[str, Any], student_id: str) -> int:
+def save_debate(
+    result: dict[str, Any], cfg: dict[str, Any], student_id: str,
+    tutorial_group: int | None = None, logged_in_as_tutor: bool = False,
+) -> int:
     """
     Insert one completed debate: the debate row (config + outcome +
     reflection + token total), its panel, every contribution, every peer
     review, and every prompt sent. Returns the new debate id.
 
     `result` is the dict from core.runner.collect_result(), with "outcome"
-    and "reflection" added by app/pages/5_Run.py once the student saves
-    them (see _render_outcome_and_downloads - saving the outcome is what
-    triggers this call).
+    and "reflection" added by app/pages/5_Run.py once the student saves them.
     """
     upsert_student(student_id)
 
@@ -222,6 +292,10 @@ def save_debate(result: dict[str, Any], cfg: dict[str, Any], student_id: str) ->
     ecu_cfg = cfg.get("ecu", {})
     agent_cfgs = cfg.get("agents", [])
     outcome = result.get("outcome") or {}
+
+    # Manual mode has no round cap so save None
+    is_manual = protocol.get("run_mode") == "Manual (step-through)"
+    max_cycles = None if is_manual else protocol.get("max_cycles")
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -232,9 +306,10 @@ def save_debate(result: dict[str, Any], cfg: dict[str, Any], student_id: str) ->
                      protocol_setting, run_mode, visibility_mode, review_depth,
                      order_type, max_cycles, stopping_rule, num_agents,
                      has_human_agent, ecu_enabled, num_turns, converged,
-                     outcome_label, outcome_notes, reflection, total_tokens)
+                     outcome_label, outcome_notes, reflection, total_tokens,
+                     tutorial_group, logged_in_as_tutor)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s)
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -247,7 +322,7 @@ def save_debate(result: dict[str, Any], cfg: dict[str, Any], student_id: str) ->
                     protocol.get("visibility_mode"),
                     protocol.get("review_depth"),
                     protocol.get("order_type"),
-                    protocol.get("max_cycles"),
+                    max_cycles,
                     protocol.get("stopping_rule"),
                     len(agent_cfgs),
                     any(a.get("provider") == "Human" for a in agent_cfgs),
@@ -258,6 +333,8 @@ def save_debate(result: dict[str, Any], cfg: dict[str, Any], student_id: str) ->
                     outcome.get("notes"),
                     result.get("reflection"),
                     result.get("total_tokens"),
+                    tutorial_group,
+                    logged_in_as_tutor,
                 ),
             )
             debate_id = cur.fetchone()[0]
@@ -283,20 +360,25 @@ def save_debate(result: dict[str, Any], cfg: dict[str, Any], student_id: str) ->
                     agent_rows,
                 )
 
-            contribution_rows = [
-                (
-                    debate_id, o.get("agent_name"), o.get("cycle"), o.get("contribution"),
+            # hub._log is appended in the order contributions happened, so a 
+            # running per-cycle counter here is each contribution's speaking position
+            cycle_counters: dict[int, int] = {}
+            contribution_rows = []
+            for o in result.get("log", []):
+                cycle = o.get("cycle")
+                speaking_order = cycle_counters.get(cycle, 0)
+                cycle_counters[cycle] = speaking_order + 1
+                contribution_rows.append((
+                    debate_id, o.get("agent_name"), cycle, speaking_order, o.get("contribution"),
                     o.get("raw_response"), o.get("total_tokens"), o.get("ecu_earned"),
                     o.get("timestamp"),
-                )
-                for o in result.get("log", [])
-            ]
+                ))
             if contribution_rows:
                 psycopg2.extras.execute_values(
                     cur,
                     """
                     INSERT INTO contributions
-                        (debate_id, agent_name, cycle, contribution,
+                        (debate_id, agent_name, cycle, speaking_order, contribution,
                          raw_response, total_tokens, ecu_earned, timestamp)
                     VALUES %s
                     """,
@@ -352,23 +434,35 @@ def save_debate(result: dict[str, Any], cfg: dict[str, Any], student_id: str) ->
 # Reading back (tutor view / History page)
 # ---------------------------------------------------------------------------
 
-def list_debates(student_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+def list_debates(
+    student_id: str | None = None, tutorial_group: int | None = None, limit: int = 50,
+) -> list[dict[str, Any]]:
     """
-    Return the most recent debates, newest first. Pass student_id to scope
-    to one student (the History page); omit it for a tutor-wide overview.
+    Return the most recent debates, newest first. Pass student_id to scope to
+    one student (the History page) or tutorial_group to scope to one group, and 
+    omit both for a platform-wide overview.
     """
-    where = "WHERE student_id = %s" if student_id else ""
-    params: tuple = (student_id, limit) if student_id else (limit,)
+    clauses, params = [], []
+    if student_id:
+        clauses.append("d.student_id = %s")
+        params.append(student_id)
+    if tutorial_group is not None:
+        clauses.append("d.tutorial_group = %s")
+        params.append(tutorial_group)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
     with get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 f"""
-                SELECT id, student_id, created_at, experiment_name, author, topic,
-                       protocol_setting, run_mode, num_agents, has_human_agent,
-                       num_turns, converged, outcome_label, total_tokens
-                FROM debates
+                SELECT d.id, d.student_id, d.created_at, d.experiment_name, d.author, d.topic,
+                       d.protocol_setting, d.run_mode, d.num_agents, d.has_human_agent,
+                       d.num_turns, d.converged, d.outcome_label, d.total_tokens,
+                       d.tutorial_group, d.reflection IS NOT NULL AS has_reflection,
+                       (SELECT array_agg(a.role) FROM agents a WHERE a.debate_id = d.id) AS agent_roles
+                FROM debates d
                 {where}
-                ORDER BY created_at DESC
+                ORDER BY d.created_at DESC
                 LIMIT %s
                 """,
                 params,
@@ -383,3 +477,62 @@ def get_debate(debate_id: int) -> dict[str, Any] | None:
             cur.execute("SELECT * FROM debates WHERE id = %s", (debate_id,))
             row = cur.fetchone()
             return dict(row) if row else None
+
+
+def get_debate_transcript(debate_id: int) -> list[dict[str, Any]]:
+    """
+    One row per contribution, in actual speaking order, with the agent's
+    assigned role and the exact prompt that produced it.
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT c.cycle, c.speaking_order, c.agent_name, a.role,
+                       p.prompt, c.contribution, c.total_tokens, c.timestamp
+                FROM contributions c
+                LEFT JOIN agents a ON a.debate_id = c.debate_id AND a.agent_name = c.agent_name
+                LEFT JOIN prompts p ON p.debate_id = c.debate_id AND p.cycle = c.cycle
+                    AND p.agent_name = c.agent_name AND p.phase = 'contribution'
+                WHERE c.debate_id = %s
+                ORDER BY c.cycle, c.speaking_order
+                """,
+                (debate_id,),
+            )
+            return list(cur.fetchall())
+
+
+def list_tutorial_groups() -> list[int]:
+    """Distinct tutorial groups on the roster, ascending - populates the tutor page's group picker."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT tutorial_group FROM roster WHERE tutorial_group IS NOT NULL ORDER BY tutorial_group"
+            )
+            return [row[0] for row in cur.fetchall()]
+
+
+def get_roster_overview(tutorial_group: int) -> list[dict[str, Any]]:
+    """
+    Every roster student in this group with their activity: debate count,
+    all-time token usage, and most recent debate timestamp. A student who
+    hasn't run anything yet still appears, with zeros/None - roster is the
+    source of truth for group membership, not who's shown up.
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT r.student_id, r.name,
+                       COUNT(d.id) AS debate_count,
+                       COALESCE(SUM(d.total_tokens), 0) AS total_tokens,
+                       MAX(d.created_at) AS last_activity
+                FROM roster r
+                LEFT JOIN debates d ON d.student_id = r.student_id
+                WHERE r.tutorial_group = %s
+                GROUP BY r.student_id, r.name
+                ORDER BY r.student_id
+                """,
+                (tutorial_group,),
+            )
+            return list(cur.fetchall())

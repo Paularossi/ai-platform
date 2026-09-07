@@ -2,6 +2,10 @@
 
 import streamlit as st
 
+from components.utils import require_login
+
+require_login() # checks for valid student/tutor id
+
 
 # ---------- helpers ----------
 def init_agent_config():

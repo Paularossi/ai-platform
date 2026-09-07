@@ -8,6 +8,13 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 
+def require_login() -> None:
+    """Stop rendering this page if the student/tutor hasn't logged in on Welcome yet."""
+    if not st.session_state.get("id_valid"):
+        st.warning("Please log in with your student or tutor ID on the Home page first.")
+        st.stop()
+
+
 def restore_draft(loaded: dict) -> None:
     """Restore a saved experiment JSON into session state."""
     # Clear any stale per-page session keys so every page re-initialises
