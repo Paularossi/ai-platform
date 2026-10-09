@@ -18,9 +18,10 @@ st.sidebar.caption("Step 3 of 3")
 st.sidebar.progress(1.0)
 st.sidebar.markdown("""
 **Steps**
-1. Agents
-2. Instructions & topic
+1. Topic & Agents
+2. Protocol & Evaluation
 3. **Review ← you are here**
+4. Run
 """)
 
 st.title("Review & Launch")
@@ -136,11 +137,12 @@ with main_col:
             c1.markdown("**ECU**\n\n✅ enabled")
             c2.markdown(f"**T/S/O**\n\n{val(ecu.get('info_condition'))}")
             c3.markdown(f"**Self-assessment**\n\n{'Yes' if ecu.get('include_self_assessment') else 'No'}")
-            c4.markdown(f"**Coalition τ**\n\n{val(ecu.get('coalition_threshold'))}")
+            if not is_manual:
+                c4.markdown(f"**Coalition τ**\n\n{val(ecu.get('coalition_threshold'))}")
             if ecu.get("orchestrator_enabled"):
                 st.markdown(
                     f"**Orchestrator:** ✅ enabled  ·  "
-                    f"ε={ecu.get('orchestrator_step_size', 0.1)}  ·  "
+                    "learning rate = 1 / round  ·  "
                     f"every {ecu.get('orchestrator_every', 2)} rounds"
                 )
             dims = ecu.get("dimensions", [])

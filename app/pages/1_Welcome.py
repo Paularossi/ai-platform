@@ -121,10 +121,10 @@ with left:
 
 with right:
     with st.container(border=True):
-        st.subheader("Load existing experiment")
+        st.subheader("Load setup")
         st.markdown(
-            "Upload a previously saved experiment JSON to restore all settings "
-            "and jump straight to the review page."
+            "Enter the new experiment identity on the left, then upload a saved setup "
+            "to reuse its topic, instructions, agents, and protocol settings."
         )
 
         uploaded = st.file_uploader(
@@ -155,10 +155,15 @@ with right:
                 )
 
                 if st.button(
-                    "→ Load & review", type="primary", use_container_width=True,
-                    disabled=not st.session_state.id_valid,
+                    "→ Load setup", type="primary", use_container_width=True,
+                    disabled=(not st.session_state.id_valid or
+                              not name_input.strip() or not author_input.strip()),
                 ):
-                    restore_draft(loaded)
+                    restore_draft(
+                        loaded,
+                        name_override=name_input.strip(),
+                        author_override=author_input.strip(),
+                    )
                     st.switch_page("pages/4_Review.py")
 
             except Exception as e:

@@ -15,8 +15,9 @@ def require_login() -> None:
         st.stop()
 
 
-def restore_draft(loaded: dict) -> None:
-    """Restore a saved experiment JSON into session state."""
+def restore_draft(loaded: dict, *, name_override: str | None = None,
+                  author_override: str | None = None) -> None:
+    """Restore a saved setup, optionally preserving newly entered identity fields."""
     # Clear any stale per-page session keys so every page re-initialises
     # from the freshly loaded experiment_config rather than old values.
     stale_keys = [
@@ -36,8 +37,11 @@ def restore_draft(loaded: dict) -> None:
     }
 
     ov = loaded.get("overview", {})
-    st.session_state.exp_name = ov.get("name", "")
-    st.session_state.author = ov.get("author", "")
+    name = name_override if name_override is not None else ov.get("name", "")
+    author = author_override if author_override is not None else ov.get("author", "")
+    st.session_state.exp_name = name
+    st.session_state.author = author
+    st.session_state.experiment_config["overview"] = {"name": name, "author": author}
 
     task = loaded.get("task", {})
     st.session_state.task_description = task.get("description", "")
@@ -72,7 +76,6 @@ def restore_draft(loaded: dict) -> None:
     if "dimensions" in ecu:
         st.session_state.ecu_dimensions = ecu["dimensions"]
     st.session_state.ecu_orchestrator_enabled = ecu.get("orchestrator_enabled", False)
-    st.session_state.ecu_orchestrator_step_size = float(ecu.get("orchestrator_step_size", 0.1))
     st.session_state.ecu_orchestrator_every = int(ecu.get("orchestrator_every", 2))
 
     ds = loaded.get("dataset", {})

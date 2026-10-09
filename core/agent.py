@@ -110,7 +110,7 @@ def _build_user_message(packet: ContextPacket) -> str:
                     parts.append(f"    Round {out.cycle + 1}: {contrib}")
         parts.append("")
 
-        # Show peer review scores from the most recent round only
+        # show peer review scores from the most recent round only
         most_recent = [entries[-1] for entries in by_agent.values()]
         scores_shown = False
         for out in most_recent:
@@ -118,7 +118,10 @@ def _build_user_message(packet: ContextPacket) -> str:
                 if not scores_shown:
                     parts.append("Peer review scores (average received, last round):")
                     scores_shown = True
-                score_str = ", ".join(f"{d}: {s:.2f}" for d, s in out.ecu_scores.items())
+                score_str = ", ".join(
+                    f"{packet.dimension_labels.get(d, d)}: {s:.2f}"
+                    for d, s in out.ecu_scores.items()
+                )
                 ecu_str = f"  [{out.ecu_earned:.2f} ecus]" if out.ecu_earned is not None else ""
                 parts.append(f"  {out.agent_name}: {score_str}{ecu_str}")
         if scores_shown:

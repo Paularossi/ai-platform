@@ -81,6 +81,7 @@ class Orchestrator:
         Run the update every K rounds (default 1 = every round).
     min_weight : float
         Floor for any individual weight after renormalisation (default 0.1).
+        Reduced to the equal share when the total budget cannot support it.
     enabled : bool
         If False, all update calls are no-ops.
     """
@@ -176,25 +177,30 @@ class Orchestrator:
         return update
 
     def _renormalise(self, weights: dict[str, float], target_sum: float) -> dict[str, float]:
-        """Scale weights to target_sum, clip at min_weight, redistribute residual."""
-        total = sum(weights.values())
-        if total <= 0:
-            n = len(weights)
-            return {d: target_sum / n for d in weights}
+        """Preserve the budget while applying a feasible minimum weight.
 
-        out = {d: v * target_sum / total for d, v in weights.items()}
-
-        # Clip and redistribute
-        clipped = {d: max(self.min_weight, v) for d, v in out.items()}
-        excess = sum(clipped.values()) - target_sum
-        if abs(excess) > 1e-9:
-            adjustable = [d for d in clipped if clipped[d] > self.min_weight]
-            if adjustable:
-                cut = excess / len(adjustable)
-                for d in adjustable:
-                    clipped[d] = max(self.min_weight, clipped[d] - cut)
-
-        return clipped
+        For budgets below n * min_weight, the largest feasible common floor
+        is target_sum / n. A zero budget therefore remains zero.
+        """
+        if not weights:
+            return {}
+        floor = min(self.min_weight, target_sum / len(weights))
+        remaining = dict(weights)
+        out: dict[str, float] = {}
+        budget = target_sum
+        while remaining:
+            total = sum(remaining.values())
+            scaled = {d: (v * budget / total if total > 0 else budget / len(remaining))
+                      for d, v in remaining.items()}
+            below = [d for d, v in scaled.items() if v < floor]
+            if not below:
+                out.update(scaled)
+                break
+            for d in below:
+                out[d] = floor
+                budget -= floor
+                del remaining[d]
+        return out
 
     @property
     def history(self) -> list[OrchestratorUpdate]:

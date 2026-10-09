@@ -92,6 +92,60 @@ DEFAULT_DIMENSIONS: list[dict] = [
 # PeerReviewRound
 # ---------------------------------------------------------------------------
 
+def resolve_dimensions(dimensions: list[dict] | None = None) -> list[dict]:
+    """Preserve configured rubrics, filling missing fields in older drafts."""
+    defaults = {d["name"]: d for d in DEFAULT_DIMENSIONS}
+    return [
+        {**defaults.get(d["name"], {"label": d["name"], "rubric": ""}), **d}
+        for d in (DEFAULT_DIMENSIONS if dimensions is None else dimensions)
+    ]
+
+def automatic_mode(cfg: dict) -> bool:
+    """Human participants always make a run manual, including imported drafts."""
+    return (cfg.get("protocol", {}).get("run_mode", "Automatic") == "Automatic"
+            and not any(a.get("provider") == "Human" for a in cfg.get("agents", [])))
+
+
+def dimension_keys_from_labels(dimensions: list[dict]) -> list[dict]:
+    """Use readable, unique JSON keys based on the chosen dimension names."""
+    used: set[str] = set()
+    result = []
+    for dim in dimensions:
+        base = re.sub(r"[^\w]+", "_", dim.get("label", "").strip().lower()).strip("_")
+        base = base or dim["name"]
+        key = base
+        suffix = 2
+        while key in used or key in {"justification", "importance_votes"}:
+            key = f"{base}_{suffix}"
+            suffix += 1
+        used.add(key)
+        result.append({**dim, "name": key})
+    return result
+
+
+def dimensions_for_mode(dimensions: list[dict] | None, automatic: bool) -> list[dict]:
+    dims = resolve_dimensions(dimensions)
+    if not automatic:
+        return dimension_keys_from_labels(dims)
+    consensus = next(d for d in DEFAULT_DIMENSIONS if d["name"] == "consensus")
+    # preserve a student's repurposed dimension when switching to automatic mode.
+    names = {d["name"] for d in dims}
+    for dim in dims:
+        if dim["name"] == "consensus" and any(dim[k] != consensus[k] for k in ("label", "rubric")):
+            name = "custom_consensus"
+            while name in names:
+                name += "_custom"
+            dim["name"] = name
+            names.add(name)
+    fixed = next((d for d in dims if d["name"] == "consensus"), {})
+    dims = [d for d in dims if d["name"] != "consensus"]
+    dims.append({**fixed, **consensus, "weight": fixed.get("weight", 1.0),
+                 "sw_weight": fixed.get("sw_weight", 1.0)})
+    # reserve the actual Consensus key before resolving collisions with custom labels
+    keyed = dimension_keys_from_labels([dims[-1], *dims[:-1]])
+    return [*keyed[1:], keyed[0]]
+
+
 class PeerReviewRound:
     """
     Builds the Phase 2 peer review prompt and parses the response.
@@ -117,11 +171,13 @@ class PeerReviewRound:
         include_self_assessment: bool = False,
         review_depth: str = "Previous Round",
         dry_run: bool = False,
+        coalition_enabled: bool = True,
     ):
-        self.dimensions = dimensions or DEFAULT_DIMENSIONS
+        self.dimensions = resolve_dimensions(dimensions)
         self.include_self_assessment = include_self_assessment
         self.review_depth = review_depth
         self.dry_run = dry_run
+        self.coalition_enabled = coalition_enabled
 
     def build_prompt(
         self,
@@ -226,6 +282,11 @@ class PeerReviewRound:
         lines.append("  2. A one-sentence justification summarising your overall assessment.")
         lines.append("")
         lines.append("Quality dimension rubrics:")
+        lines.append(
+            "Use the names and rubrics below to interpret each dimension. "
+            "The identifiers in parentheses are only JSON keys, not definitions; "
+            "use these exact keys for scores and importance votes."
+        )
         for d in self.dimensions:
             lines.append(f"  {d['label']} ({d['name']}): {d['rubric']}")
         lines.append("")
@@ -289,7 +350,8 @@ class PeerReviewRound:
                 cycle=cycle,
                 scores=scores,
                 self_scores=self_scores,
-                coalition_scores={n: 0.5 for n in all_contributions if n != reviewer_name},
+                coalition_scores=({n: 0.5 for n in all_contributions if n != reviewer_name}
+                                  if self.coalition_enabled and "consensus" in dim_names else {}),
                 justifications={},
                 importance_votes={},
                 raw_response="[dry-run]",
@@ -349,8 +411,8 @@ class PeerReviewRound:
 
         # Derive coalition scores from the consensus dimension
         coalition: dict[str, float] = {
-            name: scores[name].get("consensus", 0.5)
-            for name in scores
+            name: scores[name]["consensus"]
+            for name in scores if self.coalition_enabled and "consensus" in scores[name]
         }
 
         return PeerReviewOutput(
@@ -523,7 +585,7 @@ class EcuLedger:
         include_self_assessment: bool = False,
         lambda_self: float = 0.5,
     ):
-        self.dimensions = dimensions or DEFAULT_DIMENSIONS
+        self.dimensions = resolve_dimensions(dimensions)
         self.dim_names = [d["name"] for d in self.dimensions]
         self.include_self_assessment = include_self_assessment
         self.lambda_self = lambda_self

@@ -66,6 +66,7 @@ class ContextPacket:
     agent_name: str
     ecu_balances: dict[str, float] = field(default_factory=dict)
     ecu_weights: dict[str, float] = field(default_factory=dict)
+    dimension_labels: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +163,10 @@ class CommunicationHub:
             agent_name=agent_name,
             ecu_balances=ecu_balances,
             ecu_weights=ecu_weights,
+            dimension_labels={
+                d["name"]: d.get("label", d["name"])
+                for d in (self.ledger.dimensions if self.ledger else [])
+            },
         )
 
     def submit(self, output: AgentOutput) -> None:

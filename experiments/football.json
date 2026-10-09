@@ -1,0 +1,105 @@
+{
+  "meta": {
+    "saved_at": "2026-10-09T15:21:39.922256+02:00",
+    "app_version": "0.1"
+  },
+  "overview": {
+    "name": "football 2",
+    "author": "Paula"
+  },
+  "task": {
+    "description": "Who is the one GOAT of football?"
+  },
+  "instructions": {
+    "base_instructions": "Write max 3 sentences to describe your standpoint.",
+    "guideline_notes": ""
+  },
+  "agent_prompt_overrides": {},
+  "agents": [
+    {
+      "name": "Agent 1",
+      "provider": "OpenAI",
+      "model": "gpt-6-luna",
+      "temperature": 0.0,
+      "role": "Custom",
+      "custom_role": "You love Messi"
+    },
+    {
+      "name": "Agent 2",
+      "provider": "Anthropic",
+      "model": "claude-sonnet-5-5",
+      "temperature": 0.0,
+      "role": "Custom",
+      "custom_role": "You love Cristiano Ronaldo."
+    },
+    {
+      "name": "Agent 3",
+      "provider": "Google",
+      "model": "gemini-3.8-flash",
+      "temperature": 0.0,
+      "role": "Custom",
+      "custom_role": "You love Maradona."
+    }
+  ],
+  "protocol": {
+    "setting": "Simultaneous",
+    "run_mode": "Manual (step-through)",
+    "visibility_mode": "Previous round",
+    "review_depth": "Previous Round",
+    "order_type": "Fixed",
+    "custom_order": [],
+    "initializer_agent": "Agent 1",
+    "max_cycles": 5,
+    "stopping_rule": "Either"
+  },
+  "ecu": {
+    "enabled": true,
+    "info_condition": "opaque",
+    "include_self_assessment": false,
+    "coalition_threshold": 0.6,
+    "orchestrator_enabled": true,
+    "orchestrator_step_size": 0.1,
+    "orchestrator_every": 1,
+    "dimensions": [
+      {
+        "name": "depth_breadth",
+        "label": "Depth-Breadth",
+        "rubric": "Does the contribution explore the topic with both analytical rigour and sufficient breadth? 0 = too narrow or too diffuse; 1 = well-balanced depth and breadth.",
+        "weight": 0.1,
+        "sw_weight": 0.1,
+        "_editor_id": "6650b1dbcea94b38a5774855634ca720"
+      },
+      {
+        "name": "depth",
+        "label": "Depth",
+        "rubric": "Is the reasoning deep and well-evidenced? 0 = superficial assertion; 1 = rigorous argument with supporting logic or evidence.",
+        "weight": 0.1,
+        "sw_weight": 0.1,
+        "_editor_id": "a885c3c5799f4a85a98510546c42064a"
+      },
+      {
+        "name": "clarity",
+        "label": "Clarity",
+        "rubric": "Is the contribution clearly written and easy to understand? 0 = ambiguous or poorly structured; 1 = precise and well-structured.",
+        "weight": 0.1,
+        "sw_weight": 0.1,
+        "_editor_id": "5a7f25b004aa4bddbda27e239e9be0ea"
+      },
+      {
+        "label": "Attractiveness",
+        "rubric": "How attractive is the described player? 0 = ugly; 1 = super mega attractive",
+        "name": "attractiveness",
+        "weight": 0.7,
+        "sw_weight": 0.7,
+        "_editor_id": "4d95013b3afb4c58a8950bebfac16587"
+      }
+    ]
+  },
+  "dataset": {
+    "source": "single_topic",
+    "num_rows": 1,
+    "columns": [
+      "topic"
+    ]
+  }
+}

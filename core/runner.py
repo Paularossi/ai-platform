@@ -24,7 +24,7 @@ from typing import Any
 import pandas as pd
 
 from core.agent import Agent
-from core.ecu import CoalitionTracker, DEFAULT_DIMENSIONS, EcuLedger, PeerReviewRound
+from core.ecu import CoalitionTracker, EcuLedger, PeerReviewRound, dimensions_for_mode, automatic_mode
 from core.hub import CommunicationHub
 from core.orchestrator import Orchestrator
 from core.protocols.crowd import CrowdProtocol
@@ -53,12 +53,13 @@ def build_peer_reviewer(cfg: dict, review_depth: str) -> PeerReviewRound | None:
     if not ecu_cfg.get("enabled", False):
         return None
 
-    dim_configs = ecu_cfg.get("dimensions") or DEFAULT_DIMENSIONS
-    active_dims = [d for d in DEFAULT_DIMENSIONS if d["name"] in {dd["name"] for dd in dim_configs}]
+    dim_configs = dimensions_for_mode(ecu_cfg.get("dimensions"), automatic_mode(cfg))
+    active_dims = dim_configs
     return PeerReviewRound(
         dimensions=active_dims,
         include_self_assessment=ecu_cfg.get("include_self_assessment", False),
         review_depth=review_depth,
+        coalition_enabled=automatic_mode(cfg),
     )
 
 
@@ -76,10 +77,10 @@ def build_ecu_components(
     if not ecu_cfg.get("enabled", False):
         return None, None, None
 
-    dim_configs = ecu_cfg.get("dimensions") or DEFAULT_DIMENSIONS
+    dim_configs = dimensions_for_mode(ecu_cfg.get("dimensions"), automatic_mode(cfg))
     ecu_weights = {d["name"]: float(d.get("weight", 1.0)) for d in dim_configs}
     sw_weights = {d["name"]: float(d.get("sw_weight", 1.0)) for d in dim_configs}
-    active_dims = [d for d in DEFAULT_DIMENSIONS if d["name"] in ecu_weights]
+    active_dims = dim_configs
 
     ledger = EcuLedger(
         agent_names=agent_names,
@@ -88,7 +89,8 @@ def build_ecu_components(
         sw_weights=sw_weights,
         include_self_assessment=ecu_cfg.get("include_self_assessment", False),
     )
-    coalition = CoalitionTracker(threshold=float(ecu_cfg.get("coalition_threshold", 0.6)))
+    coalition = (CoalitionTracker(threshold=float(ecu_cfg.get("coalition_threshold", 0.6)))
+                 if automatic_mode(cfg) else None)
     orchestrator: Orchestrator | None = None
     if ecu_cfg.get("orchestrator_enabled", False):
         orchestrator = Orchestrator(
@@ -115,7 +117,7 @@ def build_protocol(
     setting = cfg.get("protocol", {}).get("setting", "Simultaneous")
     kwargs = dict(
         peer_reviewer=peer_reviewer,
-        coalition_tracker=coalition_tracker,
+        coalition_tracker=coalition_tracker if automatic_mode(cfg) else None,
         orchestrator=orchestrator,
         dry_run=dry_run,
     )
@@ -261,6 +263,8 @@ def build_transcript_md(result: dict, cfg: dict) -> str:
     topic = cfg.get("task", {}).get("description", "").strip()
     proto = cfg.get("protocol", {})
     agents_cfg = cfg.get("agents", [])
+    labels = {d["name"]: d.get("label", d["name"])
+              for d in cfg.get("ecu", {}).get("dimensions", [])}
 
     lines.append(f"# {exp_name} — Transcript")
     lines.append("")
@@ -293,7 +297,7 @@ def build_transcript_md(result: dict, cfg: dict) -> str:
             lines.append("")
             for review in round_reviews:
                 for reviewed, dim_scores in review.get("scores", {}).items():
-                    scores_str = ", ".join(f"{d}: {round(s, 2)}" for d, s in dim_scores.items())
+                    scores_str = ", ".join(f"{labels.get(d, d)}: {round(s, 2)}" for d, s in dim_scores.items())
                     justification = review.get("justifications", {}).get(reviewed, "")
                     lines.append(f"- *{review['reviewer_name']} → {reviewed}* — {scores_str}")
                     if justification:

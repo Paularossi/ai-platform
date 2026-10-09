@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
 from components.utils import require_login
 from core.agent import unescape_literal_whitespace
 from core.ecu import PeerReviewRound
+from core.transcript import build_transcript_html
 from core.runner import (
     build_agents, build_ecu_components, build_hub, build_item_data,
     build_peer_reviewer, build_protocol, build_transcript_md, collect_result,
@@ -65,11 +66,10 @@ st.sidebar.caption("▶ Running")
 st.sidebar.progress(1.0)
 st.sidebar.markdown("""
 **Steps**
-1. Overview
-2. Agents
-3. Instructions & topic
-4. Review
-5. **Run ← you are here**
+1. Topic & Agents
+2. Protocol & Evaluation
+3. Review
+4. **Run ← you are here**
 """
 )
 
@@ -104,7 +104,7 @@ if missing:
         st.switch_page("pages/4_Review.py")
     st.stop()
 
-# The platform runs one ongoing deliberation on one topic — the row built from Step 3's topic field.
+# the platform runs one ongoing deliberation on one topic (from Step 3's topic field)
 topic_row = df.iloc[0]
 topic_text = str(topic_row.get("topic", "")).strip()
 
@@ -279,7 +279,7 @@ def _render_outcome_and_downloads(results: list[dict], experiment_cfg: dict) -> 
     timestamp = datetime.now(_AMS).strftime("%Y%m%d_%H%M")
     exp_name = experiment_cfg.get("overview", {}).get("name", "experiment").replace(" ", "_").lower()
 
-    dl1, dl2 = st.columns(2)
+    dl1, dl2, dl3 = st.columns(3)
     with dl1:
         transcript_md = build_transcript_md(result, experiment_cfg)
         st.download_button(
@@ -289,6 +289,14 @@ def _render_outcome_and_downloads(results: list[dict], experiment_cfg: dict) -> 
             mime="text/markdown",
             use_container_width=True,
             help="A readable, round-by-round record of what was said.",
+        )
+    with dl3:
+        st.download_button(
+            "⬇ Transcript (.html)",
+            data=build_transcript_html(result, experiment_cfg).encode("utf-8"),
+            file_name=f"{exp_name}_{timestamp}_transcript.html",
+            mime="text/html", use_container_width=True,
+            help="Readable transcript with additions and deletions highlighted in each edited prompt.",
         )
     with dl2:
         full_json = json.dumps(results, indent=2, ensure_ascii=False, default=str)
@@ -375,7 +383,11 @@ def _feed_entry_from_event(event, hub) -> dict | None:
         ]
         if not reviews:
             return None
-        return {"kind": "peer_review", "cycle": event.cycle, "agent_name": event.agent_name, "review": reviews[-1]}
+        return {"kind": "peer_review", "cycle": event.cycle, "agent_name": event.agent_name,
+                "review": reviews[-1], "dimension_labels": {
+                    d["name"]: d.get("label", d["name"])
+                    for d in (hub.ledger.dimensions if hub.ledger else [])
+                }}
     if event.kind == "ecu_update":
         return {"kind": "ecu_update", "cycle": event.cycle, "balances": dict(hub.ecu_balances)}
     return None
@@ -390,15 +402,19 @@ def _render_feed_entry(entry: dict) -> None:
                 st.caption(f"✏️ {entry['changed_note']}")
     elif entry["kind"] == "peer_review":
         review = entry["review"]
+        labels = entry.get("dimension_labels") or {
+            d["name"]: d.get("label", d["name"])
+            for d in cfg.get("ecu", {}).get("dimensions", [])
+        }
         with st.expander(f"📋 {entry['agent_name']} — peer review", expanded=False):
             for reviewed, dim_scores in review.scores.items():
-                scores_str = ", ".join(f"{d}: {round(s, 2)}" for d, s in dim_scores.items())
+                scores_str = ", ".join(f"{labels.get(d, d)}: {round(s, 2)}" for d, s in dim_scores.items())
                 justification = review.justifications.get(reviewed, "")
                 st.markdown(f"**{reviewed}** — {scores_str}")
                 if justification:
                     st.caption(justification)
             if review.importance_votes:
-                vote_parts = "  ·  ".join(f"**{d}**: {round(v)}" for d, v in review.importance_votes.items())
+                vote_parts = "  ·  ".join(f"**{labels.get(d, d)}**: {round(v)}" for d, v in review.importance_votes.items())
                 st.caption(f"Dimension importance votes (out of 100): {vote_parts}")
     elif entry["kind"] == "ecu_update":
         balances = entry["balances"]

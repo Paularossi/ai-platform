@@ -1,6 +1,5 @@
 """
 core/providers.py
-
 Thin LLM provider wrappers.
 
 Each provider class exposes a single method:
@@ -21,6 +20,34 @@ Adding a new provider:
 
 from __future__ import annotations
 
+import re
+
+
+def uses_default_temperature(provider: str, model: str) -> bool:
+    """Models whose sampling controls are restricted or best left at defaults."""
+    if provider == "OpenAI":
+        return bool(re.match(r"(?:gpt-[5-9]|o[1-9])", model))
+    if provider == "Anthropic":
+        return bool(re.match(r"claude-(?:sonnet|opus|haiku)-[5-9]", model)
+                    or model.startswith(("claude-opus-4-7", "claude-opus-4-8")))
+    return provider == "Google" and model.startswith("gemini-3")
+
+
+def openai_options(model: str, max_tokens: int, temperature: float) -> dict:
+    options = {"max_completion_tokens": max_tokens}
+    if uses_default_temperature("OpenAI", model):
+        options["reasoning_effort"] = "none" if model.startswith("gpt-6-luna") else "low"
+    else:
+        options["temperature"] = temperature
+    return options
+
+
+def anthropic_options(model: str, max_tokens: int, temperature: float) -> dict:
+    options = {"max_tokens": max_tokens}
+    if not uses_default_temperature("Anthropic", model):
+        options["temperature"] = temperature
+    return options
+
 
 # ---------------------------------------------------------------------------
 # Supported providers and their model menus
@@ -30,22 +57,19 @@ PROVIDERS: list[str] = ["OpenAI", "Anthropic", "Google"]
 
 PROVIDER_MODELS: dict[str, list[str]] = {
     "OpenAI": [
-        "gpt-4o",
-        "gpt-4o-mini",
-        "gpt-4-turbo",
-        "o1",
-        "o1-mini",
+        "gpt-6-luna", # default, $0.10 input / $0.50 output
+        "gpt-4.1-mini", # $0.40 input / $1.60 output
+        "gpt-6.1-sol", # $2.00 input / $10.00 output
+        "gpt-4o", # $2.50 input / $10.00 output
     ],
-    "Anthropic": [
-        "claude-opus-4-8",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5",
+    "Anthropic": [ # opus and fable don't seem relevant
+        "claude-sonnet-5-5", # default, $2.00 input / $10.00 output
+        "claude-haiku-4-5", # $1.00 input / $5.00 output
     ],
-    "Google": [
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
+    "Google": [ # api calls seem to be a bit slower
+        "gemini-3.8-flash", # default, $0.75 input / $3.75 output
+        "gemini-3.5-flash-lite", # $0.30 input / $2.50 output
+        #"gemini-3.1-pro-preview",
     ],
 }
 
@@ -75,6 +99,9 @@ class LLMProvider:
 
     def get_last_usage(self) -> dict[str, int | None]:
         return dict(self.last_usage)
+
+    def reset_usage(self) -> None:
+        self.last_usage = dict.fromkeys(("input_tokens", "output_tokens", "total_tokens"))
 
     def complete(
         self,
@@ -115,14 +142,14 @@ class OpenAIProvider(LLMProvider):
 
     def complete(self, model, system_prompt, user_message,
                  max_tokens=1500, temperature=0.0) -> str:
+        self.reset_usage()
         response = self._get_client().chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_message},
             ],
-            temperature=temperature,
-            max_tokens=max_tokens,
+            **openai_options(model, max_tokens, temperature),
         )
         if response.usage:
             self.last_usage = {
@@ -134,14 +161,14 @@ class OpenAIProvider(LLMProvider):
 
     def stream(self, model, system_prompt, user_message,
                max_tokens=1500, temperature=0.0):
+        self.reset_usage()
         response = self._get_client().chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_message},
             ],
-            temperature=temperature,
-            max_tokens=max_tokens,
+            **openai_options(model, max_tokens, temperature),
             stream=True,
             stream_options={"include_usage": True},
         )
@@ -176,12 +203,12 @@ class AnthropicProvider(LLMProvider):
 
     def complete(self, model, system_prompt, user_message,
                  max_tokens=1500, temperature=0.0) -> str:
+        self.reset_usage()
         response = self._get_client().messages.create(
             model=model,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
-            temperature=temperature,
-            max_tokens=max_tokens,
+            **anthropic_options(model, max_tokens, temperature),
         )
         if response.usage:
             self.last_usage = {
@@ -189,16 +216,16 @@ class AnthropicProvider(LLMProvider):
                 "output_tokens": response.usage.output_tokens,
                 "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
             }
-        return response.content[0].text if response.content else ""
+        return "".join(block.text for block in response.content if block.type == "text")
 
     def stream(self, model, system_prompt, user_message,
                max_tokens=1500, temperature=0.0):
+        self.reset_usage()
         with self._get_client().messages.stream(
             model=model,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
-            temperature=temperature,
-            max_tokens=max_tokens,
+            **anthropic_options(model, max_tokens, temperature),
         ) as stream:
             for text in stream.text_stream:
                 yield text
@@ -244,11 +271,14 @@ class GoogleProvider(LLMProvider):
         """
         from google.genai import types
 
+        self.reset_usage()
+
         config_kwargs: dict = {
             "system_instruction": system_prompt,
-            "temperature": temperature,
             "max_output_tokens": max_tokens,
         }
+        if not uses_default_temperature("Google", model):
+            config_kwargs["temperature"] = temperature
         if json_mode:
             config_kwargs["response_mime_type"] = "application/json"
             # Disable safety categories that incorrectly block structured
@@ -291,7 +321,8 @@ class GoogleProvider(LLMProvider):
             }
 
         try:
-            text = response.candidates[0].content.parts[0].text
+            text = "".join(part.text for part in response.candidates[0].content.parts
+                           if part.text and not getattr(part, "thought", False))
             if text:
                 return text
         except (IndexError, AttributeError, TypeError):
@@ -316,9 +347,10 @@ class GoogleProvider(LLMProvider):
         """
         from google.genai import types
 
+        self.reset_usage()
         config = types.GenerateContentConfig(
             system_instruction=system_prompt,
-            temperature=temperature,
+            temperature=None if uses_default_temperature("Google", model) else temperature,
             max_output_tokens=max_tokens,
         )
         try:
