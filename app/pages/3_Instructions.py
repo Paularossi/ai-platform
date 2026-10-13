@@ -173,7 +173,7 @@ with main_col:
                         )
                 st.session_state.custom_order = sorted(agent_names, key=lambda n: (ranks[n], agent_names.index(n)))
                 st.caption("Order: " + " → ".join(st.session_state.custom_order))
-            else:
+            elif st.session_state.order_type == "Fixed":
                 st.session_state.initializer_agent = st.selectbox(
                     "Initializer / first agent",
                     agent_names,

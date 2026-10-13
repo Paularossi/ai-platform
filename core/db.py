@@ -18,6 +18,9 @@ from typing import Any
 
 import psycopg2
 import psycopg2.extras
+from core.ecu import automatic_mode
+from core.providers import uses_default_temperature
+from core.usage import aggregate_agent_usage, TOKEN_FIELDS
 
 # Placeholder for testing - change later.
 # Warn-only: nothing in the app blocks a student from running over this.
@@ -77,7 +80,13 @@ CREATE TABLE IF NOT EXISTS agents (
     model              TEXT,
     temperature        DOUBLE PRECISION,
     is_human           BOOLEAN,
-    final_ecu_balance  DOUBLE PRECISION
+    final_ecu_balance  DOUBLE PRECISION,
+    input_tokens       BIGINT,
+    output_tokens      BIGINT,
+    total_tokens       BIGINT,
+    cached_input_tokens BIGINT,
+    cache_creation_input_tokens BIGINT,
+    reasoning_tokens   BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS contributions (
@@ -114,7 +123,11 @@ CREATE TABLE IF NOT EXISTS prompts (
     phase            TEXT,
     prompt           TEXT,
     original_prompt  TEXT,
-    response         TEXT
+    response         TEXT,
+    provider         TEXT,
+    model            TEXT,
+    usage            JSONB,
+    timestamp        TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_debates_student_id ON debates(student_id);
@@ -123,6 +136,7 @@ CREATE INDEX IF NOT EXISTS idx_agents_debate_id ON agents(debate_id);
 CREATE INDEX IF NOT EXISTS idx_contributions_debate_id ON contributions(debate_id);
 CREATE INDEX IF NOT EXISTS idx_peer_reviews_debate_id ON peer_reviews(debate_id);
 CREATE INDEX IF NOT EXISTS idx_prompts_debate_id ON prompts(debate_id);
+
 """
 
 
@@ -294,8 +308,10 @@ def save_debate(
     outcome = result.get("outcome") or {}
 
     # Manual mode has no round cap so save None
-    is_manual = protocol.get("run_mode") == "Manual (step-through)"
+    is_manual = not automatic_mode(cfg)
     max_cycles = None if is_manual else protocol.get("max_cycles")
+    sequential = protocol.get("setting") in ("Sequential", "Gossip (sequential)")
+    ecu_enabled = ecu_cfg.get("enabled", False)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -318,12 +334,12 @@ def save_debate(
                     overview.get("author"),
                     cfg.get("task", {}).get("description"),
                     protocol.get("setting"),
-                    protocol.get("run_mode"),
+                    "Manual (step-through)" if is_manual else "Automatic",
                     protocol.get("visibility_mode"),
-                    protocol.get("review_depth"),
-                    protocol.get("order_type"),
+                    protocol.get("review_depth") if ecu_enabled else None,
+                    protocol.get("order_type") if sequential else None,
                     max_cycles,
-                    protocol.get("stopping_rule"),
+                    protocol.get("stopping_rule") if not is_manual else None,
                     len(agent_cfgs),
                     any(a.get("provider") == "Human" for a in agent_cfgs),
                     ecu_cfg.get("enabled", False),
@@ -340,21 +356,27 @@ def save_debate(
             debate_id = cur.fetchone()[0]
 
             final_balances = result.get("ecu_balances", {})
-            agent_rows = [
-                (
-                    debate_id, a.get("name"), a.get("role"), a.get("provider"), a.get("model"),
-                    a.get("temperature"), a.get("provider") == "Human",
-                    final_balances.get(a.get("name")),
-                )
-                for a in agent_cfgs
-            ]
+            agent_rows = []
+            for a in agent_cfgs:
+                human = a.get("provider") == "Human"
+                usage = aggregate_agent_usage(result.get("prompt_log", []), a.get("name"))
+                temperature = (None if human or uses_default_temperature(
+                    a.get("provider", ""), a.get("model") or "") else a.get("temperature"))
+                agent_rows.append((
+                    debate_id, a.get("name"), a.get("role"), a.get("provider"),
+                    None if human else a.get("model"), temperature, human,
+                    final_balances.get(a.get("name")) if ecu_enabled else None,
+                    *(None if human else usage[field] for field in TOKEN_FIELDS),
+                ))
             if agent_rows:
                 psycopg2.extras.execute_values(
                     cur,
                     """
                     INSERT INTO agents
                         (debate_id, agent_name, role, provider, model,
-                         temperature, is_human, final_ecu_balance)
+                         temperature, is_human, final_ecu_balance,
+                         input_tokens, output_tokens, total_tokens, cached_input_tokens,
+                         cache_creation_input_tokens, reasoning_tokens)
                     VALUES %s
                     """,
                     agent_rows,
@@ -412,6 +434,9 @@ def save_debate(
                 (
                     debate_id, p.get("cycle"), p.get("agent"), p.get("phase"),
                     p.get("prompt"), p.get("original_prompt"), p.get("response"),
+                    p.get("provider"), p.get("model"),
+                    psycopg2.extras.Json(p["usage"]) if p.get("usage") is not None else None,
+                    p.get("timestamp"),
                 )
                 for p in result.get("prompt_log", [])
             ]
@@ -420,7 +445,8 @@ def save_debate(
                     cur,
                     """
                     INSERT INTO prompts
-                        (debate_id, cycle, agent_name, phase, prompt, original_prompt, response)
+                        (debate_id, cycle, agent_name, phase, prompt, original_prompt, response,
+                         provider, model, usage, timestamp)
                     VALUES %s
                     """,
                     prompt_rows,

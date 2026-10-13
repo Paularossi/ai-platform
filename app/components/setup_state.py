@@ -38,7 +38,9 @@ def sync_agents_to_config():
         "review_depth": st.session_state.get("review_depth", "Previous Round"),
         "order_type": st.session_state.order_type,
         "custom_order": st.session_state.get("custom_order", []),
-        "initializer_agent": st.session_state.initializer_agent,
+        "initializer_agent": (st.session_state.get("initializer_agent")
+                              if st.session_state.interaction_setting == "Sequential"
+                              and st.session_state.order_type == "Fixed" else None),
         "max_cycles": st.session_state.max_cycles,
         "stopping_rule": st.session_state.stopping_rule,
     }

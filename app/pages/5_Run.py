@@ -242,14 +242,6 @@ def _render_outcome_and_downloads(results: list[dict], experiment_cfg: dict) -> 
             height=80,
             key="outcome_notes_input",
         )
-    save_label = "💾 Update outcome" if saved_outcome else "🏁 Save outcome & close debate"
-    if st.button(save_label, type="primary" if not saved_outcome else "secondary"):
-        results[0]["outcome"] = {"label": outcome_label, "notes": outcome_notes}
-        st.session_state["run_results"] = results
-        _sync_debate_to_db(results[0], experiment_cfg)
-        st.toast("Outcome saved.")
-        st.rerun()
-
     st.divider()
     st.subheader("Reflection")
     st.caption(
@@ -262,11 +254,13 @@ def _render_outcome_and_downloads(results: list[dict], experiment_cfg: dict) -> 
         height=120,
         key="reflection_input",
     )
-    if st.button("💾 Update reflection" if saved_reflection else "💾 Save reflection"):
+    save_label = "💾 Update outcome & reflection" if saved_outcome else "🏁 Save outcome & reflection"
+    if st.button(save_label, type="primary" if not saved_outcome else "secondary"):
+        results[0]["outcome"] = {"label": outcome_label, "notes": outcome_notes}
         results[0]["reflection"] = reflection_text
         st.session_state["run_results"] = results
         _sync_debate_to_db(results[0], experiment_cfg)
-        st.toast("Reflection saved.")
+        st.toast("Outcome and reflection saved.")
         st.rerun()
 
     st.divider()

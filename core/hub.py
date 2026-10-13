@@ -21,6 +21,7 @@ outer loop (cycles, stopping rule) and delegates everything else here.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from core.state import AgentOutput, PeerReviewOutput
@@ -67,6 +68,9 @@ class ContextPacket:
     ecu_balances: dict[str, float] = field(default_factory=dict)
     ecu_weights: dict[str, float] = field(default_factory=dict)
     dimension_labels: dict[str, str] = field(default_factory=dict)
+    # Independent of contribution visibility: sequential turns can replace the
+    # latest visible contribution, but must not replace last round's scores.
+    previous_round_outputs: list[AgentOutput] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +171,7 @@ class CommunicationHub:
                 d["name"]: d.get("label", d["name"])
                 for d in (self.ledger.dimensions if self.ledger else [])
             },
+            previous_round_outputs=[out for out in self._log if out.cycle == cycle - 1],
         )
 
     def submit(self, output: AgentOutput) -> None:
@@ -268,7 +273,9 @@ class CommunicationHub:
         return self._total_tokens
 
     def log_prompt(self, cycle: int, agent_name: str, phase: str,
-                   prompt: str, response: str = "", original_prompt: str | None = None) -> None:
+                   prompt: str, response: str = "", original_prompt: str | None = None,
+                   provider: str | None = None, model: str | None = None,
+                   usage: dict | None = None) -> None:
         """
         Record a prompt sent to an agent, for debugging and for the full log.
 
@@ -283,6 +290,10 @@ class CommunicationHub:
             "prompt": prompt,
             "response": response,
             "original_prompt": original_prompt,
+            "provider": provider,
+            "model": model,
+            "usage": usage,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
     @property

@@ -120,6 +120,8 @@ class CrowdProtocol:
                     cycle_idx, agent.name, "contribution",
                     prompt=f"[SYSTEM]\n{agent._last_system_prompt}\n\n[USER]\n{agent._last_user_message}",
                     response=output.raw_response or "",
+                    provider=agent.provider, model=None if agent.is_human else agent.model,
+                    usage=getattr(agent, "last_usage", None),
                     original_prompt=(
                         f"[SYSTEM]\n{orig_system_prompt}\n\n[USER]\n{orig_user_message}" if edited else None
                     ),
@@ -190,6 +192,7 @@ class CrowdProtocol:
                     agent_histories=agent_histories,
                     collect_importance_votes=collect_votes,
                 )
+                usage = None
                 try:
                     pr_kwargs = {"json_mode": True} if agent.provider == "Google" else {}
                     pr_provider = get_provider(agent.provider)
@@ -197,14 +200,16 @@ class CrowdProtocol:
                         model=agent.model,
                         system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
                         user_message=prompt,
-                        max_tokens=800,
+                        max_tokens=1600,
                         temperature=agent.temperature,
                         **pr_kwargs,
                     )
-                    hub.add_tokens(pr_provider.get_last_usage().get("total_tokens"))
+                    usage = pr_provider.get_last_usage()
+                    hub.add_tokens(usage.get("total_tokens"))
                 except Exception as exc:
                     raw = f"[ERROR: {exc}]"
-                hub.log_prompt(cycle_idx, agent.name, "peer_review", prompt=prompt, response=raw)
+                hub.log_prompt(cycle_idx, agent.name, "peer_review", prompt=prompt, response=raw,
+                               provider=agent.provider, model=agent.model, usage=usage)
                 review = self.peer_reviewer.parse(
                     reviewer_name=agent.name,
                     cycle=cycle_idx,

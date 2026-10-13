@@ -304,6 +304,8 @@ Adding a new provider: subclass `LLMProvider` in `core/providers.py` (implement 
 
 ## Output
 
+Database saves include per-agent/model token totals and per-call usage details for contributions and peer reviews.
+
 **From a UI run**, once an outcome has been saved:
 - **Transcript (.md)** - a readable, round-by-round record of the deliberation, ending with the outcome and any notes.
 - **Transcript (.html)** - styled topic, quality dimensions with initial ECU/SW weights, peer-review tables, prompts with additions/deletions highlighted, outcome, reflection.
@@ -324,6 +326,14 @@ python -m unittest discover -s tests
 ```
 
 Offline tests cover the pipeline, custom dimensions, weight normalization, provider request compatibility, setup navigation and HTML exports. Discovery includes the legacy pipeline checks (no API keys are required). See [test coverage notes](tests/README.md) for remaining gaps.
+
+Optional live checks exercise completion, streaming and peer-review JSON through the app's provider wrappers:
+
+```bash
+python scripts/check_models.py --provider Google --model gemini-3.8-flash --live
+```
+
+Omit `--live` to preview without requests. Use `--all` instead of `--model` to check all menu models, optionally filtered by provider. Each model makes five requests by default and uses API credits; see the test notes for options and the known sequential-score regression.
 
 ---
 

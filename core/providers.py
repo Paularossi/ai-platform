@@ -21,6 +21,7 @@ Adding a new provider:
 from __future__ import annotations
 
 import re
+from core.usage import normalize_usage
 
 
 def uses_default_temperature(provider: str, model: str) -> bool:
@@ -93,15 +94,13 @@ class LLMProvider:
         # output_tokens, total_tokens}, all None until a call has completed.
         # Streaming SDKs surface usage differently per provider (see each
         # subclass's stream()), so this is populated at different points.
-        self.last_usage: dict[str, int | None] = {
-            "input_tokens": None, "output_tokens": None, "total_tokens": None,
-        }
+        self.last_usage = normalize_usage('', None)
 
-    def get_last_usage(self) -> dict[str, int | None]:
+    def get_last_usage(self) -> dict:
         return dict(self.last_usage)
 
     def reset_usage(self) -> None:
-        self.last_usage = dict.fromkeys(("input_tokens", "output_tokens", "total_tokens"))
+        self.last_usage = normalize_usage('', None)
 
     def complete(
         self,
@@ -152,11 +151,7 @@ class OpenAIProvider(LLMProvider):
             **openai_options(model, max_tokens, temperature),
         )
         if response.usage:
-            self.last_usage = {
-                "input_tokens": response.usage.prompt_tokens,
-                "output_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
+            self.last_usage = normalize_usage('OpenAI', response.usage)
         return response.choices[0].message.content or ""
 
     def stream(self, model, system_prompt, user_message,
@@ -174,11 +169,7 @@ class OpenAIProvider(LLMProvider):
         )
         for chunk in response:
             if chunk.usage:
-                self.last_usage = {
-                    "input_tokens": chunk.usage.prompt_tokens,
-                    "output_tokens": chunk.usage.completion_tokens,
-                    "total_tokens": chunk.usage.total_tokens,
-                }
+                self.last_usage = normalize_usage('OpenAI', chunk.usage)
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta.content
@@ -211,11 +202,7 @@ class AnthropicProvider(LLMProvider):
             **anthropic_options(model, max_tokens, temperature),
         )
         if response.usage:
-            self.last_usage = {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-                "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
-            }
+            self.last_usage = normalize_usage('Anthropic', response.usage)
         return "".join(block.text for block in response.content if block.type == "text")
 
     def stream(self, model, system_prompt, user_message,
@@ -233,11 +220,7 @@ class AnthropicProvider(LLMProvider):
             # get_final_message() blocks until then and carries it.
             final = stream.get_final_message()
             if final.usage:
-                self.last_usage = {
-                    "input_tokens": final.usage.input_tokens,
-                    "output_tokens": final.usage.output_tokens,
-                    "total_tokens": final.usage.input_tokens + final.usage.output_tokens,
-                }
+                self.last_usage = normalize_usage('Anthropic', final.usage)
 
 
 # ---------------------------------------------------------------------------
@@ -314,11 +297,7 @@ class GoogleProvider(LLMProvider):
         # content can be None (SAFETY block) → accessing .parts raises TypeError.
         usage = getattr(response, "usage_metadata", None)
         if usage:
-            self.last_usage = {
-                "input_tokens": usage.prompt_token_count,
-                "output_tokens": usage.candidates_token_count,
-                "total_tokens": usage.total_token_count,
-            }
+            self.last_usage = normalize_usage('Google', usage)
 
         try:
             text = "".join(part.text for part in response.candidates[0].content.parts
@@ -364,11 +343,7 @@ class GoogleProvider(LLMProvider):
                 # overwrite last_usage until it settles there.
                 usage = getattr(chunk, "usage_metadata", None)
                 if usage:
-                    self.last_usage = {
-                        "input_tokens": usage.prompt_token_count,
-                        "output_tokens": usage.candidates_token_count,
-                        "total_tokens": usage.total_token_count,
-                    }
+                    self.last_usage = normalize_usage('Google', usage)
                 if chunk.text:
                     yield chunk.text
         except Exception as exc:

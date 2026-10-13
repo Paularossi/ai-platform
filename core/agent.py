@@ -110,8 +110,12 @@ def _build_user_message(packet: ContextPacket) -> str:
                     parts.append(f"    Round {out.cycle + 1}: {contrib}")
         parts.append("")
 
-        # show peer review scores from the most recent round only
-        most_recent = [entries[-1] for entries in by_agent.values()]
+        # scores come from the completed round, independently of the latest contributions shown above
+        most_recent = packet.previous_round_outputs
+        if most_recent is None:
+            most_recent = [out for out in packet.visible_history
+                           if out.cycle == packet.cycle - 1]
+
         scores_shown = False
         for out in most_recent:
             if out.ecu_scores:
@@ -320,6 +324,8 @@ class Agent:
         self._last_system_prompt = system_prompt
         self._last_user_message = user_message
 
+        self.last_usage = None
+
         if human_input is not None:
             return AgentOutput(
                 agent_name=self.name,
@@ -346,7 +352,8 @@ class Agent:
                 user_message=user_message,
                 temperature=self.temperature,
             )
-            total_tokens = provider.get_last_usage().get("total_tokens")
+            self.last_usage = provider.get_last_usage()
+            total_tokens = self.last_usage.get("total_tokens")
         except Exception as exc:
             raw_text = f"[ERROR: {exc}]"
 
@@ -371,6 +378,7 @@ class Agent:
         self._last_system_prompt = system_prompt
         self._last_user_message = user_message
         self._stream_chunks: list[str] = []
+        self.last_usage = None
         self._stream_total_tokens: int | None = None
         try:
             provider = get_provider(self.provider)
@@ -382,7 +390,8 @@ class Agent:
             ):
                 self._stream_chunks.append(chunk)
                 yield chunk
-            self._stream_total_tokens = provider.get_last_usage().get("total_tokens")
+            self.last_usage = provider.get_last_usage()
+            self._stream_total_tokens = self.last_usage.get("total_tokens")
         except Exception as exc:
             err = f"[ERROR: {exc}]"
             self._stream_chunks.append(err)
