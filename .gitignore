@@ -157,3 +157,7 @@ cython_debug/
 
 # secrets
 .streamlit/secrets.toml
+.vscode/
+.workflow-build/
+docs/
+meeting notes.txt

@@ -61,7 +61,7 @@ PROVIDER_MODELS: dict[str, list[str]] = {
         "gpt-6-luna", # default, $0.10 input / $0.50 output
         "gpt-4.1-mini", # $0.40 input / $1.60 output
         "gpt-6.1-sol", # $2.00 input / $10.00 output
-        "gpt-4o", # $2.50 input / $10.00 output
+        #"gpt-4o", # $2.50 input / $10.00 output
     ],
     "Anthropic": [ # opus and fable don't seem relevant
         "claude-sonnet-5-5", # default, $2.00 input / $10.00 output
