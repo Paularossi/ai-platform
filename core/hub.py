@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 from core.state import AgentOutput, PeerReviewOutput
 
 if TYPE_CHECKING:
-    from core.ecu import EcuLedger
+    from core.mechanisms.ecu import EcuLedger
 
 
 # ---------------------------------------------------------------------------
@@ -53,8 +53,8 @@ class ContextPacket:
         The name of the agent about to be called.
     ecu_balances : dict[str, float]
         Current ecu balances for all agents.
-        Populated only under the transparent information condition;
-        empty dict otherwise.
+        All balances under transparency, own balance under semi-transparency,
+        and an empty dict under opacity.
     """
     item_id: str
     item_data: dict[str, Any]
@@ -63,6 +63,8 @@ class ContextPacket:
     agent_name: str
     ecu_balances: dict[str, float] = field(default_factory=dict)
     ecu_weights: dict[str, float] = field(default_factory=dict)
+    previous_round_outputs: list[AgentOutput] | None = None
+    ecu_info_condition: str = "opaque"
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +182,8 @@ class CommunicationHub:
             agent_name=agent_name,
             ecu_balances=ecu_balances,
             ecu_weights=ecu_weights,
+            previous_round_outputs=[o for o in self._log if o.cycle == cycle - 1],
+            ecu_info_condition=self.ecu_info_condition,
         )
 
     def submit(self, output: AgentOutput) -> None:
@@ -216,6 +220,13 @@ class CommunicationHub:
         earned: dict[str, float] = {}
         for agent_name in self.agent_names:
             out = outputs_by_agent.get(agent_name)
+            if (out is None or not out.contribution
+                    or str(out.contribution).startswith(("[ERROR:", "[BLOCKED:"))):
+                continue
+            if not any(agent_name in review.scores or
+                       (review.reviewer_name == agent_name and review.self_scores)
+                       for review in round_reviews):
+                continue  # Missing reviews are not neutral scores or earned ECUs.
             record = self.ledger.record_from_reviews(
                 agent_name=agent_name,
                 cycle=cycle,

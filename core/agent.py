@@ -13,9 +13,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from core.llm.call_log import invoke
 from core.hub import ContextPacket
 from core.state import AgentOutput
-from core.providers import get_provider
+from core.llm.providers import get_provider
 # Prompt builders
 # ---------------------------------------------------------------------------
 
@@ -110,7 +111,8 @@ def _build_user_message(packet: ContextPacket) -> str:
         parts.append("")
 
         # Show peer review scores from the most recent round only
-        most_recent = [entries[-1] for entries in by_agent.values()]
+        most_recent = (packet.previous_round_outputs if packet.previous_round_outputs is not None
+                       else [entries[-1] for entries in by_agent.values()])
         scores_shown = False
         for out in most_recent:
             if out.ecu_scores:
@@ -118,29 +120,33 @@ def _build_user_message(packet: ContextPacket) -> str:
                     parts.append("Peer review scores (average received, last round):")
                     scores_shown = True
                 score_str = ", ".join(f"{d}: {s:.2f}" for d, s in out.ecu_scores.items())
-                ecu_str = f"  [{out.ecu_earned:.2f} ecus]" if out.ecu_earned is not None else ""
+                show_earnings = (packet.ecu_info_condition == "transparent" or
+                                 (packet.ecu_info_condition == "semi-transparent"
+                                  and out.agent_name == packet.agent_name))
+                ecu_str = (f"  [{out.ecu_earned:.2f} ecus]"
+                           if show_earnings and out.ecu_earned is not None else "")
                 parts.append(f"  {out.agent_name}: {score_str}{ecu_str}")
         if scores_shown:
             parts.append("")
 
-        # Show ECU balance info based on information condition
-        # packet.ecu_balances is populated for both T and S conditions
+    # ECU visibility is independent of contribution-history visibility.
+    if packet.ecu_info_condition == "transparent":
         if packet.ecu_balances:
-            own_balance = packet.ecu_balances.get(packet.agent_name)
-            if own_balance is not None and len(packet.ecu_balances) == 1:
-                # Semi-transparent: only own balance was passed
-                parts.append(f"Your current ECU balance: {own_balance:.2f}")
-            else:
-                # Transparent: all balances + weight vector
-                bal_str = ", ".join(f"{k}: {v:.2f}" for k, v in packet.ecu_balances.items())
-                parts.append(f"Current ECU balances: {bal_str}")
-                if packet.ecu_weights:
-                    w_str = ", ".join(f"{k}={v:.2f}" for k, v in packet.ecu_weights.items())
-                    parts.append(f"Current quality weights: {w_str}")
-            parts.append("")
-
-        parts.append("=== Your turn ===")
-        parts.append("")
+            bal_str = ", ".join(f"{k}: {v:.2f}" for k, v in packet.ecu_balances.items())
+            parts.append(f"Current ECU balances: {bal_str}")
+        if packet.ecu_weights:
+            w_str = ", ".join(f"{k}={v:.2f}" for k, v in packet.ecu_weights.items())
+            parts.append(f"Current quality weights: {w_str}")
+    elif packet.ecu_info_condition == "semi-transparent":
+        own_balance = packet.ecu_balances.get(packet.agent_name)
+        if own_balance is not None:
+            parts.append(f"Your current ECU balance: {own_balance:.2f}")
+        if packet.ecu_weights:
+            w_str = ", ".join(f"{k}={v:.2f}" for k, v in packet.ecu_weights.items())
+            parts.append(f"Approximate quality weights: {w_str}")
+    parts.append("")
+    parts.append("=== Your turn ===")
+    parts.append("")
 
     return "\n".join(parts)
 
@@ -258,7 +264,7 @@ class Agent:
 
         try:
             provider = get_provider(self.provider)
-            raw_text = provider.complete(
+            raw_text = invoke(provider, "complete", self.name, "contribution", packet.cycle,
                 model=self.model,
                 system_prompt=system_prompt,
                 user_message=user_message,

@@ -37,13 +37,15 @@ Components
 
 from __future__ import annotations
 
+import math
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import combinations
 from typing import Any
 
 from core.state import PeerReviewOutput
+from core.mechanisms.review_checks import CHECK_RUBRIC, CHECK_EXAMPLE, validate_checks
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +119,13 @@ class PeerReviewRound:
         include_self_assessment: bool = False,
         review_depth: str = "Previous Round",
         dry_run: bool = False,
+        review_checks_enabled: bool = False,
     ):
         self.dimensions = dimensions or DEFAULT_DIMENSIONS
         self.include_self_assessment = include_self_assessment
         self.review_depth = review_depth
         self.dry_run = dry_run
+        self.review_checks_enabled = review_checks_enabled
 
     def build_prompt(
         self,
@@ -240,22 +244,22 @@ class PeerReviewRound:
             )
             lines.append("")
 
-        lines.append("Return your evaluation as a JSON object in this exact format:")
-        lines.append("(Do not include any text before or after the JSON object, and do not wrap it in markdown code fences.)")
-        lines.append("{")
-        for name in review_targets:
-            lines.append(f'  "{name}": {{')
-            for dim in dim_names:
-                lines.append(f'    "{dim}": <score 0.00-1.00>,')
-            lines.append('    "justification": "<one sentence>"')
-            lines.append("  },")
+        if self.review_checks_enabled:
+            lines.append(CHECK_RUBRIC)
+
+        example = {d: 0.5 for d in dim_names}
+        if self.review_checks_enabled:
+            example["review_checks"] = CHECK_EXAMPLE
+        example["justification"] = "Brief explanation of the scores."
+        response_example = {"reviews": [{"agent": name, **example} for name in review_targets]}
         if collect_importance_votes:
-            lines.append('  "importance_votes": {')
-            for i, dim in enumerate(dim_names):
-                comma = "," if i < len(dim_names) - 1 else ""
-                lines.append(f'    "{dim}": <integer points>{comma}')
-            lines.append("  }")
-        lines.append("}")
+            response_example["importance_votes"] = {d: 100 / len(dim_names) for d in dim_names}
+        lines.append(f"The reviews array must contain exactly {len(review_targets)} entries. "
+                     "Do not repeat a target or add anyone outside the listed targets.")
+        lines.append("Return JSON with exactly one reviews array entry per listed target, "
+                     "using its exact agent name. The following is a format example only; "
+                     "replace the example judgments with your assessments.")
+        lines.append(json.dumps(response_example, ensure_ascii=False))
         return "\n".join(lines)
 
     def parse(
@@ -264,6 +268,7 @@ class PeerReviewRound:
         cycle: int,
         raw: str,
         all_contributions: dict[str, Any],
+        strict: bool = False,
     ) -> PeerReviewOutput:
         """
         Parse the agent's raw response into a PeerReviewOutput.
@@ -289,7 +294,8 @@ class PeerReviewRound:
                 cycle=cycle,
                 scores=scores,
                 self_scores=self_scores,
-                coalition_scores={n: 0.5 for n in all_contributions if n != reviewer_name},
+                coalition_scores={n: 0.5 for n in review_targets if n != reviewer_name}
+                    if "consensus" in dim_names else {},
                 justifications={},
                 importance_votes={},
                 raw_response="[dry-run]",
@@ -299,6 +305,7 @@ class PeerReviewRound:
         self_scores: dict[str, float] | None = None
         justifications: dict[str, str] = {}
         importance_votes: dict[str, float] = {}
+        review_checks: dict[str, dict] = {}
 
         try:
             # Strip markdown fences (```json ... ``` or ``` ... ```)
@@ -310,11 +317,31 @@ class PeerReviewRound:
             # Remove trailing commas before closing braces/brackets
             clean = re.sub(r",(\s*[}\]])", r"\1", clean)
             parsed = json.loads(clean)
+            if strict:
+                if not isinstance(parsed, dict):
+                    raise ValueError("Peer review must be a JSON object")
+                for target in review_targets:
+                    entry = parsed.get(target)
+                    if not isinstance(entry, dict):
+                        raise ValueError(f"Missing review for {target}")
+                    for dimension in dim_names:
+                        value = entry.get(dimension)
+                        if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+                            raise ValueError(f"Invalid or missing score for {target}/{dimension}")
+                votes = parsed.get("importance_votes", {})
+                if not isinstance(votes, dict) or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in votes.values()):
+                    raise ValueError("Invalid importance votes")
 
             for name in review_targets:
                 if name not in parsed:
                     continue
                 entry = parsed[name]
+                if self.review_checks_enabled:
+                    try:
+                        review_checks[name] = validate_checks(entry.get("review_checks"), all_contributions[name])
+                    except ValueError as exc:
+                        # A missing diagnostic must not discard otherwise valid quality scores.
+                        review_checks[name] = {"error": str(exc)}
                 dim_scores: dict[str, float] = {}
                 for dim in dim_names:
                     try:
@@ -341,6 +368,8 @@ class PeerReviewRound:
                     importance_votes = {d: v * 100.0 / total for d, v in importance_votes.items()}
 
         except Exception as exc:
+            if strict:
+                raise ValueError(f"Invalid peer review: {exc}") from exc
             print(f"[PeerReviewRound] Parse error for {reviewer_name}: {exc}")
             for name in review_targets:
                 if name != reviewer_name:
@@ -349,8 +378,8 @@ class PeerReviewRound:
 
         # Derive coalition scores from the consensus dimension
         coalition: dict[str, float] = {
-            name: scores[name].get("consensus", 0.5)
-            for name in scores
+            name: scores[name]["consensus"]
+            for name in scores if "consensus" in scores[name]
         }
 
         return PeerReviewOutput(
@@ -361,6 +390,7 @@ class PeerReviewRound:
             coalition_scores=coalition,
             justifications=justifications,
             importance_votes=importance_votes,
+            review_checks=review_checks,
             raw_response=raw,
         )
 
@@ -418,7 +448,7 @@ class CoalitionTracker:
             "size": len(best),
             "threshold": self.threshold,
             "agreement_matrix": {
-                i: {j: agree.get(i, {}).get(j, 0.0) for j in agents}
+                i: {j: agree.get(i, {}).get(j) for j in agents}
                 for i in agents
             },
         }
@@ -432,9 +462,9 @@ class CoalitionTracker:
             for j in subset:
                 if i == j:
                     continue
-                if agree.get(i, {}).get(j, 0.0) < self.threshold:
+                if j not in agree.get(i, {}) or agree[i][j] < self.threshold:
                     return False
-                if agree.get(j, {}).get(i, 0.0) < self.threshold:
+                if i not in agree.get(j, {}) or agree[j][i] < self.threshold:
                     return False
         return True
 
@@ -647,10 +677,10 @@ class EcuLedger:
 
     def mean_peer_scores(self, reviews: list[PeerReviewOutput]) -> dict[str, float]:
         """
-        Compute s̄_q^(t) = (1/n)Σ_i (1/(n-1))Σ_{j≠i}s_ji^(t)(q).
+        Pool available directed reviewer-target scores for each dimension.
 
-        This is the mean peer score for each dimension across all reviewed
-        agents and reviewers in a round.
+        This equals the mean of participant means only with balanced review
+        coverage. Missing reviews can give participants unequal influence.
         """
         by_dim: dict[str, list[float]] = {d: [] for d in self.dim_names}
         for review in reviews:
@@ -668,7 +698,7 @@ class EcuLedger:
     def record_social_welfare(self, cycle: int, reviews: list[PeerReviewOutput]) -> float:
         """Compute and store social welfare for one round."""
         means = self.mean_peer_scores(reviews)
-        sw = self.compute_social_welfare(reviews)
+        sw = sum(self.sw_weights.get(dim, 1.0) * means.get(dim, 0.0) for dim in self.dim_names)
         self._social_welfare_history.append({
             "cycle": cycle,
             "mean_peer_scores": {k: round(v, 4) for k, v in means.items()},

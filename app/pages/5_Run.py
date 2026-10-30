@@ -21,7 +21,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.pdf_export import brief_to_pdf_bytes
+from app.call_diagnostics import render_call_diagnostics
+from core.exports.pdf_export import brief_to_pdf_bytes
+from core.exports.html_export import run_to_html
 from core.protocols.agent_zero_loop import run_agent_zero_experiment
 
 _AMS = ZoneInfo("Europe/Amsterdam")
@@ -131,6 +133,8 @@ def _render_round(round_summary: dict, container) -> None:
     with container:
         with st.status(label, state="complete", expanded=(cycle == 0)):
             st.markdown(f"**Panel:** {', '.join(roster)}")
+            for issue in round_summary.get("call_errors", []):
+                st.warning(f"{issue['agent']} · {issue['phase']}: {issue['error']}")
             st.markdown("**Contributions:**")
             for name, text in round_summary["contributions"].items():
                 with st.popover(name, use_container_width=True):
@@ -148,10 +152,29 @@ def _render_round(round_summary: dict, container) -> None:
                     rows.append(row)
                 st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
+            checks = round_summary.get("peer_review_checks", [])
+            if checks:
+                with st.expander("Hallucination and risk peer assessments"):
+                    st.caption("Peer judgments, not verified facts. Risk scores assess the quality of risk reasoning; higher is better. These checks do not affect ECU rewards.")
+                    for check in checks:
+                        st.markdown(f"**{check['reviewer']} reviewing {check['agent']}**")
+                        if check.get("error"):
+                            st.warning(f"Assessment unavailable: {check['error']}")
+                            continue
+                        hall, risk = check['hallucination'], check['risk']
+                        st.write(f"Hallucination: {hall['status'].replace('_', ' ')}. {hall['explanation']}")
+                        for claim in hall['flagged_claims']:
+                            st.write(f"Flagged claim: {claim['claim']}")
+                            st.caption(claim['reason'])
+                        score = risk['assessment_quality']
+                        st.write(f"Risk assessment quality: {score if score is not None else 'not assessed'}. {risk['explanation']}")
+                        for concern in risk['concerns']:
+                            st.write(concern)
+
             weights = round_summary.get("ecu_weights", {})
             if weights:
                 weights_str = "  ·  ".join(f"{k}: {v:.3f}" for k, v in weights.items())
-                st.caption(f"ECU weights after this round: {weights_str}")
+                st.caption(f"ECU weights used this round: {weights_str}")
 
             coalition = round_summary.get("coalition", [])
             if len(coalition) >= 2:
@@ -198,16 +221,20 @@ def _show_result(result: dict) -> None:
             for col, (name, bal) in zip(cols, balances.items()):
                 col.metric(name, f"{bal:.3f}")
 
+    render_call_diagnostics(result.get("debug", {}).get("prompt_log", []), "current_run")
+    if st.session_state.get("az_save_error"):
+        st.warning(st.session_state.az_save_error)
+
     timestamp = datetime.now(_AMS).strftime("%Y%m%d_%H%M")
-    dl1, dl2, dl3, dl4 = st.columns(4)
+    dl1, dl2, dl3 = st.columns(3)
     with dl1:
-        brief_bytes = result["final_brief"].encode()
         st.download_button(
-            "Download brief (.md)",
-            data=brief_bytes,
-            file_name=f"agent0_brief_{timestamp}.md",
-            mime="text/markdown",
+            "Download full transcript (.html)",
+            data=run_to_html(result, cfg, st.session_state.get("az_save_error")).encode("utf-8"),
+            file_name=f"agent0_transcript_{timestamp}.html",
+            mime="text/html",
             use_container_width=True,
+            help="The complete debate page, including panel, rounds, assessments, brief and expandable API diagnostics.",
         )
     with dl2:
         pdf_bytes = _cached_brief_pdf(result["final_brief"], topic)
@@ -219,23 +246,6 @@ def _show_result(result: dict) -> None:
             use_container_width=True,
         )
     with dl3:
-        transcript = {
-            "topic": topic,
-            "rounds": [
-                {"round": r["cycle"] + 1, "contributions": r["contributions"]}
-                for r in result.get("rounds", [])
-            ],
-        }
-        transcript_json = json.dumps(transcript, indent=2, ensure_ascii=False)
-        st.download_button(
-            "Download transcript (.json)",
-            data=transcript_json.encode(),
-            file_name=f"agent0_transcript_{timestamp}.json",
-            mime="application/json",
-            use_container_width=True,
-            help="Just what each agent said, round by round. No scores, no reasoning, no metadata.",
-        )
-    with dl4:
         full_json = json.dumps(result, indent=2, ensure_ascii=False, default=str)
         st.download_button(
             "Download full log (.json)",
@@ -257,7 +267,7 @@ def _show_nav_buttons() -> None:
             st.rerun()
     with nav2:
         if st.button("Start new debate", use_container_width=True, type="primary"):
-            for key in ("experiment_config", "az_result", "az_topic", "az_brief_instructions"):
+            for key in ("experiment_config", "az_result", "az_topic", "az_brief_instructions", "az_pending_calls", "az_save_error"):
                 st.session_state.pop(key, None)
             st.switch_page("pages/1_Welcome.py")
 
@@ -267,6 +277,8 @@ def _show_nav_buttons() -> None:
 if "az_result" not in st.session_state:
     launch = st.button("Run debate", type="primary", use_container_width=True)
     if not launch:
+        if st.session_state.get("az_pending_calls"):
+            render_call_diagnostics(st.session_state.az_pending_calls, "previous_attempt")
         st.stop()
 
     design_container = st.container()
@@ -276,23 +288,48 @@ if "az_result" not in st.session_state:
         with design_container:
             _render_design(design)
 
-    with st.spinner("Agent 0 is setting up the debate..."):
-        result = run_agent_zero_experiment(
-            cfg, dry_run=False,
-            on_init=_on_init,
-            on_round=lambda rs: _render_round(rs, rounds_container),
-        )
-    st.session_state.az_result = result
-    st.session_state.az_stream_brief = True  # animate the brief once, right after this run
+    from core.db import ensure_schema, begin_experiment, save_call, save_experiment, mark_experiment_failed
+    debate_id = None
+    st.session_state.pop("az_save_error", None)
+    st.session_state.az_pending_calls = []
+    try:
+        ensure_schema()
+        debate_id = begin_experiment(cfg)
+    except Exception as exc:
+        st.session_state.az_save_error = f"Database logging unavailable; download the full log after the run. ({exc})"
+        st.warning(st.session_state.az_save_error)
+
+    def _on_call(call):
+        if not any(c["call_id"] == call["call_id"] for c in st.session_state.az_pending_calls):
+            st.session_state.az_pending_calls.append(call)
+        if call.get("status") == "error":
+            st.warning(f"{call.get('agent')} · {call.get('phase')}: {call.get('error')}")
+        if debate_id is not None:
+            save_call(debate_id, call)
 
     try:
-        from core.db import ensure_schema, save_experiment
-        ensure_schema()
-        save_experiment(result, cfg)
+        with st.spinner("Agent 0 is running the debate..."):
+            result = run_agent_zero_experiment(cfg, dry_run=False, on_init=_on_init, on_call=_on_call,
+                on_round=lambda rs: _render_round(rs, rounds_container))
     except Exception as exc:
-        # Never let a database hiccup take down a finished debate - the
-        # person still gets their brief and downloads either way.
-        st.caption(f"Note: this run wasn't saved to the shared log ({exc}).")
+        if debate_id is not None:
+            try:
+                mark_experiment_failed(debate_id)
+            except Exception:
+                pass
+        st.error(f"The debate stopped unexpectedly: {exc}")
+        render_call_diagnostics(st.session_state.az_pending_calls, "interrupted_run")
+        st.stop()
+    st.session_state.az_result = result
+    st.session_state.az_stream_brief = True
+    try:
+        if debate_id is None:
+            ensure_schema()
+        save_experiment(result, cfg, debate_id=debate_id)
+        st.session_state.pop("az_save_error", None)
+    except Exception as exc:
+        st.session_state.az_save_error = f"This run was not fully saved. Download the full log to keep all details. ({exc})"
+
 else:
     # Cached result (e.g. after a download-button rerun) - the live callbacks
     # that rendered the design panel and each round only fire during the run

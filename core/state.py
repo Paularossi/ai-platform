@@ -100,6 +100,7 @@ class PeerReviewOutput:
     coalition_scores: dict[str, float] = field(default_factory=dict)
     justifications: dict[str, str] = field(default_factory=dict)
     importance_votes: dict[str, float] = field(default_factory=dict)
+    review_checks: dict[str, dict] = field(default_factory=dict)
     raw_response: str | None = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -112,6 +113,7 @@ class PeerReviewOutput:
             "coalition_scores": self.coalition_scores,
             "justifications": self.justifications,
             "importance_votes": self.importance_votes,
+            "review_checks": self.review_checks,
             "raw_response": self.raw_response,
             "timestamp": self.timestamp,
         }

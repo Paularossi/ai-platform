@@ -22,9 +22,9 @@ from typing import Any
 import pandas as pd
 
 from core.agent import Agent
-from core.ecu import CoalitionTracker, DEFAULT_DIMENSIONS, EcuLedger, PeerReviewRound
+from core.mechanisms.ecu import CoalitionTracker, DEFAULT_DIMENSIONS, EcuLedger, PeerReviewRound
 from core.hub import CommunicationHub
-from core.orchestrator import Orchestrator
+from core.mechanisms.orchestrator import Orchestrator
 from core.protocols.crowd import CrowdProtocol
 from core.protocols.gossip import GossipProtocol
 

@@ -5,7 +5,7 @@ Agent 0 mode's orchestration loop — replaces the fixed-roster protocol
 iteration (CrowdProtocol/GossipProtocol) with a dynamic loop:
 
     roster = agent_zero.initialize(topic)              # one-time call
-    while cycle < max_rounds and total_spawns <= max_total_spawns:
+    while cycle < max_rounds:
         run one debate round with the current roster    # Phase 1 + Phase 2,
                                                           # reusing existing
                                                           # Agent/PeerReviewRound/
@@ -20,27 +20,34 @@ round style is fixed to Simultaneous (Crowd-style) for now; Agent 0 does not
 yet choose the protocol.
 
 The Orchestrator always runs in this mode (fixed cadence, never a per-debate
-opt-out): weight optimisation via participatory importance votes is core
+opt-out): weight updating via participatory importance votes is core
 platform mechanism, not something a debate's designer gets to switch off.
 This is what makes the ECU visibility condition (T/S/O) meaningful — under
 Transparent/Semi-transparent, agents are watching real, moving numbers, not
 a static value fixed at round 0. The one exception: the update is skipped on
 the debate's actual final round (known only after Agent 0's decide() call,
-since it can end any round) — a gradient step no agent will ever act on
+since it can end any round) — a vote-based update no agent will ever act on
 shouldn't be folded into the weights reported as "final".
 """
 
 from __future__ import annotations
+
+from core.mechanisms.review_checks import review_check_records
+
+from copy import deepcopy
+from core.llm.call_log import collect_calls, current_calls, call_errors
+from core.llm.usage import aggregate_model_usage
+from core.llm.providers import uses_default_temperature
 
 import difflib
 import json
 from typing import Any
 
 from core.agent import Agent
-from core.agent_zero import AgentZero
-from core.ecu import CoalitionTracker, EcuLedger, PeerReviewRound
+from core.agent_zero import AgentZero, _validate_ecu_dimensions, _validate_coalition_threshold
+from core.mechanisms.ecu import CoalitionTracker, EcuLedger, PeerReviewRound
 from core.hub import CommunicationHub
-from core.orchestrator import Orchestrator
+from core.mechanisms.orchestrator import Orchestrator
 from core.protocols import run_peer_review_for_agent
 
 
@@ -132,7 +139,11 @@ def _run_peer_review_round(
 
     Returns this round's PeerReviewOutput list.
     """
+    all_contributions = {n: text for n, text in all_contributions.items()
+                         if text and not str(text).startswith(("[ERROR:", "[BLOCKED:"))}
     if not all_contributions:
+        if coalition_tracker:
+            coalition_tracker.find_coalition([])
         return []
 
     item_context = ", ".join(f"{k}: {v}" for k, v in hub.item_data.items())
@@ -151,7 +162,8 @@ def _run_peer_review_round(
         coalition_tracker.find_coalition(round_reviews)
     if ledger:
         hub.compute_ecus_for_round(cycle)
-        ledger.record_social_welfare(cycle, round_reviews)
+        if any(r.scores for r in round_reviews):
+            ledger.record_social_welfare(cycle, round_reviews)
 
     return round_reviews
 
@@ -164,7 +176,7 @@ def _maybe_update_weights(
     is_final_round: bool,
 ) -> None:
     """
-    Apply the Orchestrator's gradient step for this round, unless it's the
+    Apply the Orchestrator's vote-based update for this round, unless it's the
     debate's actual final round. Skipping on the true final round means the
     weights an agent never got to act on don't get folded in — the reported
     "final" weights are the ones that were genuinely operative during the
@@ -179,7 +191,7 @@ def _maybe_update_weights(
         orchestrator.update(cycle=cycle, ledger=ledger, importance_votes=importance_votes)
 
 
-def run_agent_zero_experiment(
+def _run_agent_zero_experiment(
     cfg: dict,
     dry_run: bool = False,
     on_round: Any = None,
@@ -221,13 +233,16 @@ def run_agent_zero_experiment(
     """
     from core.runner import build_ecu_components, build_hub, build_peer_reviewer
 
+    cfg = deepcopy(cfg)
     az_cfg = cfg.get("agent_zero", {})
     max_rounds = int(az_cfg.get("max_rounds", 10))
     max_agents = int(az_cfg.get("max_agents", 6))
     max_total_spawns = int(az_cfg.get("max_total_spawns", 8))
+    if min(max_rounds, max_agents, max_total_spawns) < 1:
+        raise ValueError("Round and agent limits must be positive integers.")
     az_provider = az_cfg.get("provider", "Anthropic")
-    az_model = az_cfg.get("model", "claude-sonnet-4-6")
-    az_temperature = float(az_cfg.get("temperature", 0.0))
+    az_model = az_cfg.get("model", "claude-sonnet-5-5")
+    az_temperature = float(az_cfg.get("temperature") or 0.0)
 
     topic = cfg.get("task", {}).get("description", "")
     # Final-brief-only instructions - deliberately kept out of hub.item_data
@@ -255,7 +270,7 @@ def run_agent_zero_experiment(
     # is respected as an override; anything left unset is Agent 0's call,
     # not a hardcoded default.
     init_result = agent_zero.initialize(topic, brief_instructions=brief_instructions)
-    initial_roster = init_result["agents"][:max_agents]
+    initial_roster = init_result["agents"][:min(max_agents, max_total_spawns)]
 
     instructions_cfg = cfg.setdefault("instructions", {})
     if not instructions_cfg.get("base_instructions", "").strip():
@@ -268,11 +283,13 @@ def run_agent_zero_experiment(
     ecu_cfg["include_self_assessment"] = False
     if not ecu_cfg.get("dimensions"):
         ecu_cfg["dimensions"] = init_result["ecu_dimensions"]
+    ecu_cfg["dimensions"] = _validate_ecu_dimensions(ecu_cfg["dimensions"])
     if "coalition_threshold" not in ecu_cfg:
         ecu_cfg["coalition_threshold"] = init_result["coalition_threshold"]
+    ecu_cfg["coalition_threshold"] = _validate_coalition_threshold(ecu_cfg["coalition_threshold"])
     if "info_condition" not in ecu_cfg:
         ecu_cfg["info_condition"] = init_result["info_condition"]
-    # Weight optimisation runs every round forcing these rather than building an Orchestrator by hand here
+    # Weight updating runs every round forcing these rather than building an Orchestrator by hand here
     ecu_cfg["orchestrator_enabled"] = True
     ecu_cfg["orchestrator_every"] = 1
 
@@ -290,6 +307,9 @@ def run_agent_zero_experiment(
     agent_names = list(agents_by_name.keys())
 
     peer_reviewer = build_peer_reviewer(cfg, review_depth)
+    if peer_reviewer:
+        peer_reviewer.dry_run = dry_run
+        peer_reviewer.review_checks_enabled = az_cfg.get("review_checks_enabled", True)
     ledger, coalition, orchestrator = build_ecu_components(cfg, agent_names, review_depth)
 
     hub = build_hub("item_0", {"topic": topic}, cfg, agent_names, ledger)
@@ -368,6 +388,18 @@ def run_agent_zero_experiment(
             max_total_spawns=max_total_spawns,
             brief_instructions=brief_instructions,
         )
+        if ledger:
+            context += "\nEvaluation definitions and weights used this round:\n" + json.dumps({
+                "dimensions": ecu_cfg["dimensions"],
+                "ecu_weights": ledger.ecu_weights,
+                "sw_weights": ledger.sw_weights,
+                "current_mean_peer_scores": next((r["mean_peer_scores"] for r in reversed(
+                    ledger.social_welfare_history) if r["cycle"] == cycle), None),
+            }, ensure_ascii=False)
+        checks = review_check_records(round_reviews)
+        if checks:
+            context += "\nPeer assessments of hallucination and risk (unverified peer judgments, not factual findings):\n" + json.dumps(checks, ensure_ascii=False)
+        agent_zero.cycle = cycle
         decision = agent_zero.decide(context, hub.agent_names)
         own_history.append({"cycle": cycle, "reasoning": decision["reasoning"]})
 
@@ -376,49 +408,43 @@ def run_agent_zero_experiment(
         # bound, or Agent 0 is ending it right here. Only now is it safe to
         # apply (or skip) the Orchestrator's weight update for this round.
         is_final_round = decision["end_debate"] or (cycle >= max_rounds - 1)
+        weights_used = dict(ledger.ecu_weights) if ledger else {}
         _maybe_update_weights(orchestrator, ledger, cycle, round_reviews, is_final_round)
 
-        # Log Agent 0's own call alongside contribution/peer_review entries so
-        # it's inspectable in prompt_log rather than invisible. Logging the
-        # raw pre-validation response (not just the validated decision) makes
-        # it possible to tell whether the model's `reasoning` drifted from
-        # what it actually put in the structured fields.
-        raw_response = decision.pop("_raw_response", None)
-        hub.log_prompt(
-            cycle, "Agent0", "agent_zero_decision",
-            prompt=context,
-            response=json.dumps({"raw": raw_response, "validated": decision}, ensure_ascii=False),
-        )
+        decision.pop("_raw_response", None)
 
         # ── Execute decision, subject to hard bounds ─────────────────────
         actually_removed: list[str] = []
         actually_added: list[str] = []
 
-        for name in decision["remove_agents"]:
-            if len(hub.agent_names) <= 1:
-                break
-            hub.remove_agent(name, cycle=cycle)
-            actually_removed.append(name)
+        # No next-round actions are executed after termination. Raw proposals
+        # remain available in the coordinator call log.
+        if not is_final_round:
+            for name in decision["remove_agents"]:
+                if len(hub.agent_names) <= 1:
+                    break
+                hub.remove_agent(name, cycle=cycle)
+                actually_removed.append(name)
 
-        for spec in decision["add_agents"]:
-            if len(hub.agent_names) >= max_agents or total_spawns >= max_total_spawns:
-                break
-            name = spec["name"]
-            if name in agents_by_name:
-                continue
-            agents_by_name[name] = Agent(spec, cfg)
-            hub.add_agent(name, cycle=cycle)
-            if ledger:
-                ledger.add_agent(name)
-            total_spawns += 1
-            actually_added.append(name)
+            for spec in decision["add_agents"]:
+                if len(hub.agent_names) >= max_agents or total_spawns >= max_total_spawns:
+                    break
+                name = spec["name"]
+                if name in agents_by_name:
+                    continue
+                agents_by_name[name] = Agent(spec, cfg)
+                hub.add_agent(name, cycle=cycle)
+                if ledger:
+                    ledger.add_agent(name)
+                total_spawns += 1
+                actually_added.append(name)
 
-        # Dynamic per-agent instructions — mutate the shared dict in place so
-        # every Agent's cached `_overrides` reference sees the update without
-        # rebuilding the Agent. Only agents still on the roster are targeted
-        # (already filtered in _validate_decision).
-        for name, instruction in decision["agent_instructions"].items():
-            cfg["agent_prompt_overrides"][name] = instruction
+            # Dynamic per-agent instructions — mutate the shared dict in place so
+            # every Agent's cached `_overrides` reference sees the update without
+            # rebuilding the Agent. Only agents still on the roster are targeted
+            # (already filtered in _validate_decision).
+            for name, instruction in decision["agent_instructions"].items():
+                cfg["agent_prompt_overrides"][name] = instruction
 
         # Per-agent mean dimension scores for this round (includes "consensus",
         # which drives coalition membership) plus ECU earned this round —
@@ -440,19 +466,24 @@ def run_agent_zero_experiment(
             "contributions": dict(round_contributions),
             "agent_trajectory_notes": agent_notes,
             "dimension_scores": dimension_scores,
+            "peer_review_checks": checks,
             "ecu_earned_this_round": ecu_earned_this_round,
             "ecu_balances": dict(hub.ecu_balances),
-            "ecu_weights": dict(ledger.ecu_weights) if ledger else {},
+            "ecu_weights": weights_used,
+            "next_ecu_weights": dict(ledger.ecu_weights) if ledger else {},
             "social_welfare": (
                 ledger.social_welfare_history[-1]["social_welfare"]
-                if ledger and ledger.social_welfare_history else None
+                if ledger and ledger.social_welfare_history
+                and ledger.social_welfare_history[-1]["cycle"] == cycle else None
             ),
             "coalition": coalition_state,
             "agent_zero_reasoning": decision["reasoning"],
             "agents_added": actually_added,
+            "agents_added_specs": [dict(a) for a in decision["add_agents"] if a["name"] in actually_added],
             "agents_removed": actually_removed,
-            "agent_instructions_issued": decision["agent_instructions"],
+            "agent_instructions_issued": decision["agent_instructions"] if not is_final_round else {},
             "end_debate": decision["end_debate"],
+            "call_errors": call_errors([c for c in current_calls() if c.get("cycle") == cycle]),
         })
 
         if on_round:
@@ -496,11 +527,14 @@ def run_agent_zero_experiment(
         "ended_reason": ended_reason,
         "final_brief": final_brief,
         "agent_zero_config": {
-            "provider": az_provider, "model": az_model, "temperature": az_temperature,
+            "provider": az_provider, "model": az_model,
+            "temperature": None if uses_default_temperature(az_provider, az_model) else az_temperature,
+            "review_checks_enabled": az_cfg.get("review_checks_enabled", True),
             "max_rounds": max_rounds, "max_agents": max_agents,
             "max_total_spawns": max_total_spawns,
         },
         "initial_roster": initial_roster_names,
+        "final_roster": list(hub.agent_names),
         "agent_zero_design": design_summary,
         "rounds": round_summaries,
         "final_ecu_balances": hub.ecu_balances,
@@ -517,7 +551,7 @@ def run_agent_zero_experiment(
             # the same reason (duplicated in prompt_log).
             "peer_review_scores": [
                 {"cycle": p.cycle, "reviewer": p.reviewer_name,
-                 "scores": p.scores, "justifications": p.justifications}
+                 "scores": p.scores, "justifications": p.justifications, "review_checks": p.review_checks}
                 for p in hub.peer_review_log
             ],
             "coalition_history": coalition.to_dict() if coalition else {},
@@ -526,3 +560,13 @@ def run_agent_zero_experiment(
             "prompt_log": hub.prompt_log,  # the one place with full raw prompts + responses
         },
     }
+
+
+def run_agent_zero_experiment(cfg, dry_run=False, on_round=None, on_init=None, on_call=None):
+    """Run a debate with complete request records and optional incremental persistence."""
+    with collect_calls(on_call) as calls:
+        result = _run_agent_zero_experiment(cfg, dry_run=dry_run, on_round=on_round, on_init=on_init)
+    result["debug"]["prompt_log"] = calls
+    result["usage_by_model"] = aggregate_model_usage(calls)
+    result["call_errors"] = call_errors(calls)
+    return result

@@ -141,7 +141,7 @@ class GossipProtocol:
         for agent in ordered_agents:
             review = run_peer_review_for_agent(
                 agent, hub, cycle_idx, self.peer_reviewer, all_contributions,
-                item_context, agent_histories, collect_votes, self.peer_reviewer.dry_run,
+                item_context, agent_histories, collect_votes, self.dry_run or self.peer_reviewer.dry_run,
             )
             hub.submit_peer_review(review)
             yield RunEvent(

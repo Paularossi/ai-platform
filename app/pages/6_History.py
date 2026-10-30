@@ -11,11 +11,13 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.call_diagnostics import render_call_diagnostics
+
 st.title("Past debates")
 st.caption("Every debate run from this app is logged here, shared across everyone using it.")
 
 try:
-    from core.db import ensure_schema, get_debate_brief, list_debates
+    from core.db import ensure_schema, get_debate_brief, get_debate_calls, list_debates
     ensure_schema()
     debates = list_debates(limit=100)
 except Exception as exc:
@@ -37,7 +39,7 @@ for debate in debates:
         c1.metric("When", when)
         c2.metric("Model", debate["az_model"] or "-")
         c3.metric("Rounds", debate["num_rounds"] or "-")
-        c4.metric("Ended", debate["ended_reason"] or "-")
+        c4.metric("Status", debate.get("status") or debate["ended_reason"] or "-")
 
         is_open = st.session_state.history_open_id == debate["id"]
         if is_open:
@@ -46,7 +48,8 @@ for debate in debates:
                 st.rerun()
             brief = get_debate_brief(debate["id"])
             st.markdown(brief or "_No brief stored for this run._")
+            render_call_diagnostics(get_debate_calls(debate["id"]), f"history_{debate['id']}")
         else:
-            if st.button("View brief", key=f"view_{debate['id']}"):
+            if st.button("View debate and API calls", key=f"view_{debate['id']}"):
                 st.session_state.history_open_id = debate["id"]
                 st.rerun()

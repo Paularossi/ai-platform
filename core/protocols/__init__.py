@@ -11,9 +11,14 @@ fixed-roster protocols.
 
 from __future__ import annotations
 
+import json
+from copy import copy
+from core.mechanisms.review_checks import peer_review_schema, unpack_peer_reviews
+
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from core.llm.call_log import invoke, mark_validation_error
 from core.hub import ContextPacket
 from core.state import AgentOutput, PeerReviewOutput
 
@@ -56,6 +61,7 @@ def run_peer_review_for_agent(
     agent_histories: dict[str, list[str]],
     collect_importance_votes: bool,
     dry_run: bool,
+    max_tokens: int = 1600,
 ) -> PeerReviewOutput:
     """
     Run one agent's peer review call: build the prompt, call its provider,
@@ -68,6 +74,8 @@ def run_peer_review_for_agent(
     streaming, orchestrator hookup, etc.), since that genuinely differs.
     """
     if dry_run:
+        peer_reviewer = copy(peer_reviewer)
+        peer_reviewer.dry_run = True
         return peer_reviewer.parse(
             reviewer_name=agent.name, cycle=cycle, raw="[dry-run]",
             all_contributions=all_contributions,
@@ -85,24 +93,44 @@ def run_peer_review_for_agent(
         agent_histories=agent_histories,
         collect_importance_votes=collect_importance_votes,
     )
+    provider = None
     try:
-        from core.providers import get_provider
-        pr_kwargs = {"json_mode": True} if agent.provider == "Google" else {}
-        raw = get_provider(agent.provider).complete(
+        from core.llm.providers import get_provider
+        targets = [name for name in all_contributions
+                   if peer_reviewer.include_self_assessment or name != agent.name]
+        schema = peer_review_schema(peer_reviewer.dimensions, targets,
+                                    peer_reviewer.review_checks_enabled, collect_importance_votes)
+        if not targets:
+            return PeerReviewOutput(reviewer_name=agent.name, cycle=cycle)
+        provider = get_provider(agent.provider)
+        parsed = invoke(provider, "complete_structured", agent.name, "peer_review", cycle,
+            schema=schema,
             model=agent.model,
             system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
             user_message=prompt,
-            max_tokens=800,
+            max_tokens=(max_tokens + 500 * len(all_contributions)
+                        if peer_reviewer.review_checks_enabled else max_tokens),
             temperature=agent.temperature,
-            **pr_kwargs,
         )
+        try:
+            parsed = unpack_peer_reviews(parsed, targets, collect_importance_votes)
+        except ValueError as exc:
+            mark_validation_error(provider, str(exc))
+            raise
+        raw = json.dumps(parsed, ensure_ascii=False)
     except Exception as exc:
         raw = f"[ERROR: {exc}]"
 
     hub.log_prompt(cycle, agent.name, "peer_review", prompt=prompt, response=raw)
-    return peer_reviewer.parse(
-        reviewer_name=agent.name, cycle=cycle, raw=raw, all_contributions=all_contributions,
-    )
+    try:
+        return peer_reviewer.parse(
+            reviewer_name=agent.name, cycle=cycle, raw=raw, all_contributions=all_contributions, strict=True,
+        )
+    except ValueError as exc:
+        if provider is not None and not raw.startswith("[ERROR:"):
+            mark_validation_error(provider, str(exc))
+        return PeerReviewOutput(reviewer_name=agent.name, cycle=cycle, raw_response=raw)
+
 
 
 def finalize_peer_review_round(

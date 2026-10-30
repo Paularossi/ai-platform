@@ -34,7 +34,7 @@ ai-platform/
 │   ├── agent_zero.py            # AgentZero: Agent 0 mode's super-agent (init/decide/brief)
 │   ├── providers.py             # LLM provider wrappers (OpenAI, Anthropic, Google)
 │   ├── ecu.py                   # PeerReviewRound, CoalitionTracker, EcuLedger
-│   ├── orchestrator.py          # Orchestrator: importance-vote gradient (Algorithm 1)
+│   ├── orchestrator.py          # Orchestrator: importance-vote update (Algorithm 1)
 │   ├── runner.py                # Shared construction helpers (used by UI and batch runner)
 │   ├── pdf_export.py            # Renders an Agent 0 final brief to PDF
 │   ├── db.py                    # Supabase-backed persistent debate log (History page)
@@ -47,7 +47,7 @@ ai-platform/
 │   ├── run_experiment.py        # Generic batch runner (no UI required)
 │   └── chess_test.json          # Example manual-mode config (single scenario)
 ├── tests/
-│   └── test_pipeline.py         # 81-test dry-run pipeline test suite
+│   └── test_pipeline.py         # Offline pipeline regression tests
 ├── literature/
 ├── requirements.txt
 └── README.md
@@ -86,7 +86,7 @@ ai-platform/
    ANTHROPIC_API_KEY=sk-ant-...
    GOOGLE_API_KEY=...
    ```
-   Only keys for providers you actually use are required. The `.env` file should be gitignored.
+   The live Agent 0 app requires all three provider keys because Agent 0 can select agents from any provider. The `.env` file should be gitignored.
 
 5. **Run the UI:**
    ```bash
@@ -107,7 +107,7 @@ The Streamlit app's navigation ([app/Main.py](app/Main.py)) wires up three pages
 
 **Debate** ([5_Run.py](app/pages/5_Run.py)) - a live per-round feed (contributions, peer-review scores, ECU balances, Agent 0's reasoning and any roster/instruction changes), then the final brief with four downloads: the brief as Markdown or PDF, a plain transcript JSON (just what each agent said, round by round), and the full log JSON (every prompt/response, scores, ECU ledger, coalition history).
 
-**History** ([6_History.py](app/pages/6_History.py)) - every debate run from the live app is logged to a shared Supabase (Postgres) database via [core/db.py](core/db.py), independent of any one user's session. This page lists past debates (topic, model, round count, how it ended) and can show any past debate's stored final brief on demand. Full contribution text, per-round scores, and the raw prompt log are *not* persisted here - only the brief - so those still come from the Debate page's downloads at run time, not from History.
+**History** ([6_History.py](app/pages/6_History.py)) - every debate run from the live app is logged to a shared Supabase (Postgres) database via [core/db.py](core/db.py), independent of any one user's session. This page lists past debates (topic, model, round count, how it ended) and can show any past debate's stored final brief on demand. API calls are saved incrementally in `llm_calls`, including Agent 0 initialization, contributions, reviews, decisions and final briefs. History lets you inspect prompts, responses, failures, effective settings and token usage.
 
 ---
 
@@ -179,6 +179,12 @@ What the reviewer sees depends on φ₂:
 
 ---
 
+## Hallucination and risk peer assessments
+
+Agent 0 runs optionally collect separate assessments during peer review (enabled by default in Setup). Reviewers flag specific suspected factual issues, can report that a claim cannot be verified, and assess the quality of risk reasoning on a 0-1 scale or report it as unassessable. These are peer judgments, not independently verified findings. They do not change ECU payments, importance votes or social-welfare weights. Agent 0 receives them when deciding and writing the final brief.
+
+The Debate page shows reviewer-level findings. Full JSON exports preserve the parsed assessments, while persistent API call records retain their original prompts and responses.
+
 ## ECU mechanism
 
 **Payout formula:**
@@ -198,7 +204,7 @@ $$SW^{(t)} = \sum_{q \in \mathcal{Q}} w_q^{SW} \cdot \frac{1}{n} \sum_{i \in \ma
 | `depth_breadth` | Analytical rigour with sufficient breadth across relevant angles |
 | `depth` | Depth of reasoning and quality of evidence |
 | `clarity` | Clarity, precision, and structure of the contribution |
-| `consensus` | Whether the contribution constructively advances group agreement or productively engages with opposing views |
+| `consensus` | In superagent mode, compatibility with the reviewer's current substantive position, using a fixed rubric |
 
 Rubrics are defined in the experiment config and injected into the peer review prompt verbatim and no interpretation is hardcoded.
 
@@ -210,17 +216,17 @@ Rubrics are defined in the experiment config and injected into the peer review p
 
 ## Orchestrator (Algorithm 1)
 
-When enabled, runs every K rounds after peer review completes. Uses an **importance-vote gradient** approach (no extra API calls).
+When enabled, runs every K rounds after peer review completes. Uses an **importance-vote update** approach (no extra API calls).
 
 **Update rule:**
 
 1. During Phase 2, each agent distributes 100 importance points across the dimensions.
 2. Average votes across agents: $\bar{v}_q = \frac{1}{n} \sum_i v_{iq}$ (sums to 100).
 3. Normalise: $\hat{v}_q = \bar{v}_q / 100$ (sums to 1).
-4. Gradient step with $1/t$ learning rate: $w_q^{ECU}(t+1) = w_q^{ECU}(t) + \frac{1}{t} \cdot \hat{v}_q$
+4. Vote step with $1/t$ learning rate: $w_q^{ECU}(t+1) = w_q^{ECU}(t) + \frac{1}{t} \cdot \hat{v}_q$
 5. Renormalise to initial sum to keep the ECU budget stable.
 
-The $1/t$ schedule satisfies the Robbins-Monro conditions: larger updates early, diminishing over time, converging in ratio as rounds accumulate.
+The $1/t$ schedule gives diminishing updates. Votes are not an objective gradient, and no optimality or convergence guarantee is claimed.
 
 ---
 
@@ -267,11 +273,11 @@ Three LLM providers are supported. Each is a thin wrapper around its SDK.
 
 | Provider | SDK | Models |
 |---|---|---|
-| **OpenAI** | `openai` | `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, `o1`, `o1-mini` |
-| **Anthropic** | `anthropic` | `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
-| **Google** | `google-genai` | `gemini-3.5-flash`, `gemini-3.1-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash` |
+| **OpenAI** | `openai` | `gpt-6-luna`, `gpt-4.1-mini`, `gpt-6.1-sol`, `gpt-4o` |
+| **Anthropic** | `anthropic` | `claude-sonnet-5-5`, `claude-haiku-4-5` |
+| **Google** | `google-genai` | `gemini-3.8-flash`, `gemini-3.5-flash-lite` |
 
-Agents from different providers can participate in the same experiment.
+Agents from different providers can participate in the same experiment. Empty, truncated and malformed responses are recorded as errors. Call records retain provider-reported input, output, cache and reasoning token counts. The full Agent 0 log also aggregates usage by model.
 
 Adding a new provider: subclass `LLMProvider` in `core/providers.py`, add it to `PROVIDERS`, `PROVIDER_MODELS`, and `API_KEY_ENV_VARS`.
 
@@ -299,10 +305,12 @@ This expands on the two file kinds the batch runner writes to `experiments/resul
 ## Running tests
 
 ```bash
-python tests/test_pipeline.py
+python -m unittest discover -s tests
+python scripts/check_models.py --all                 # preview only, no paid calls
+python scripts/check_models.py --all --live          # paid checks, using the app's peer-review path
 ```
 
-81 tests, no API key required (uses `dry_run=True`). Covers: event sequence, Phase 1 blindness in round 1, peer review structure, ECU calculation, self-assessment, coalition tracking (minimum size 2, mutual threshold), prompt construction, importance vote parsing, and JSON serialisation.
+Offline tests cover the pipeline, all provider adapters, sequential score visibility, failed reviews, roster selection, token accounting and persistence. Live checks exercise contributions, structured Agent 0 decisions and repeated peer reviews. They print request counts and effective output budgets before running. Set the relevant API keys in the environment before running the script.
 
 ---
 
@@ -318,10 +326,18 @@ python tests/test_pipeline.py
 
 **Two separate weight vectors.** $w^{SW}$ (social welfare weights) are fixed by the experimenter and define what good deliberation looks like from the social planner's perspective. $w^{ECU}$ (incentive weights) are the Orchestrator's decision variable and are updated by Algorithm 1. The connection between them is indirect: changing $w^{ECU}$ shifts agent incentives, which changes contributions, which changes peer scores, which changes $SW^{(t)}$ even though $w^{SW}$ never moves.
 
-**Participatory weight updating.** The Orchestrator uses agents' own importance votes rather than sandbox re-runs, making weight updating free (no extra API calls) and participatory - agents themselves determine the gradient direction.
+**Participatory weight updating.** The Orchestrator uses agents' own importance votes rather than sandbox re-runs, making weight updating free (no extra API calls) and participatory - agents determine the relative importance signal.
 
 **Shared construction layer.** `core/runner.py` contains all experiment construction logic (building agents, protocols, hubs, ECU components). Both the Streamlit UI and the batch runner import from it, ensuring they run identical pipelines. The UI owns streaming and rendering; `runner.py` owns everything else.
 
-**One client per provider.** Each provider class holds a class-level singleton client. All agents using the same provider share one connection object, avoiding repeated client instantiation across contributions and peer reviews.
+**One client per provider.** Each cached provider instance reuses its SDK client; request diagnostics and usage are isolated by thread. All agents using the same provider share one connection object, avoiding repeated client instantiation across contributions and peer reviews.
 
 **Prompt log for debugging.** Every LLM call is logged with the full prompt and response. Inspect `prompt_log` in the JSON output to verify visibility settings, check what agents actually see, and diagnose unexpected behaviour.
+
+Superagent consistency: consensus uses a fixed agreement rubric with configurable weights; missing agreement scores cannot form coalitions. Terminal rounds execute no roster or instruction changes. Round exports distinguish `ecu_weights` used for allocations from `next_ecu_weights`. Missing current-round SW is explicitly marked unavailable.
+
+Peer reviews use provider-native structured responses, with local validation of score ranges and exact flagged excerpts. Gemini 3 calls allow at least 8,192 output tokens (including thinking), using low thinking for Flash and minimal for 3.5 Flash Lite.
+
+Peer-review responses use a reusable array-entry schema to limit grammar complexity as panels grow; target coverage is validated locally. Flagged quotes may differ in whitespace only and are stored as their original source excerpts.
+
+The Debate page exports a standalone HTML transcript containing the panel, rules, all rounds, peer assessments, final brief, balances and expandable API diagnostics.

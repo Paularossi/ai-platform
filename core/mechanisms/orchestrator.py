@@ -1,7 +1,7 @@
 """
 core/orchestrator.py
 
-Importance-vote gradient Orchestrator for the peer-review OMAS platform.
+Importance-vote Orchestrator for the peer-review OMAS platform.
 
 The platform separates two weight vectors:
 
@@ -14,7 +14,7 @@ the quality dimensions, answering the question:
 "Given the topic of the debate and your role, which dimensions are most important
 to you?"
 
-Update rule (Robbins-Monro gradient ascent)
+Update rule (normalized importance votes)
 -------------------------------------------
 Let v_i = agent i's importance vector (sums to 100).
 Let v̄_q  = (1/n) * sum_i v_i_q             (mean vote across agents, sums to 100)
@@ -23,12 +23,10 @@ Let v̂_q  = v̄_q / 100                       (normalised, sums to 1)
 New weights before renormalisation:
     w_q^ECU(t+1) = w_q^ECU(t) + (1/t) * v̂_q
 
-Then renormalise so sum(w_q^ECU) = initial_sum, preserving the update direction
-while keeping the ECU budget stable across rounds.
+Then renormalise so sum(w_q^ECU) = initial_sum, applying a feasible minimum weight while preserving the weight total across rounds.
 
-The 1/t learning rate satisfies the Robbins-Monro conditions (sum 1/t = inf,
-sum 1/t^2 < inf), guaranteeing convergence as t -> inf. For finite T the schedule
-gives larger updates early and diminishing updates later, without unbounded growth.
+The 1/t step size gives diminishing updates. Importance votes are not an
+estimated objective gradient; no optimality or convergence guarantee is claimed.
 
 Advantages over the earlier sandbox coordinate-search approach:
   - Zero additional LLM calls (votes collected in regular Phase 2)
@@ -38,16 +36,16 @@ Advantages over the earlier sandbox coordinate-search approach:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from core.ecu import EcuLedger
+    from core.mechanisms.ecu import EcuLedger
 
 
 @dataclass
 class OrchestratorUpdate:
-    """Record of one importance-vote gradient step."""
+    """Record of one importance-vote step."""
     cycle: int
     old_weights: dict[str, float]
     raw_votes: dict[str, dict[str, float]]
@@ -75,7 +73,7 @@ class OrchestratorUpdate:
 
 class Orchestrator:
     """
-    Updates w^ECU using importance-vote gradient ascent.
+    Updates w^ECU using normalized importance votes.
 
     The fixed SW valuation vector w^SW lives in EcuLedger.sw_weights and is
     never changed by this class.
@@ -114,7 +112,7 @@ class Orchestrator:
         importance_votes: dict[str, dict[str, float]],
     ) -> OrchestratorUpdate | None:
         """
-        Apply one importance-vote gradient step.
+        Apply one importance-vote step.
 
         Parameters
         ----------
@@ -156,7 +154,7 @@ class Orchestrator:
         total = sum(mean_votes.values())
         normalised: dict[str, float] = {d: mean_votes[d] / total for d in dim_names}
 
-        # ── 4. Gradient step: w_q += (1/t) * v̂_q ───────────────────────────
+        # ── 4. Vote step: w_q += (1/t) * v̂_q ───────────────────────────
         t = cycle + 1
         lr = 1.0 / t
         old_weights = dict(ledger.ecu_weights)
@@ -181,25 +179,30 @@ class Orchestrator:
         return update
 
     def _renormalise(self, weights: dict[str, float], target_sum: float) -> dict[str, float]:
-        """Scale weights to target_sum, clip at min_weight, redistribute residual."""
-        total = sum(weights.values())
-        if total <= 0:
-            n = len(weights)
-            return {d: target_sum / n for d in weights}
+        """Preserve the budget while applying a feasible minimum weight.
 
-        out = {d: v * target_sum / total for d, v in weights.items()}
-
-        # Clip and redistribute
-        clipped = {d: max(self.min_weight, v) for d, v in out.items()}
-        excess = sum(clipped.values()) - target_sum
-        if abs(excess) > 1e-9:
-            adjustable = [d for d in clipped if clipped[d] > self.min_weight]
-            if adjustable:
-                cut = excess / len(adjustable)
-                for d in adjustable:
-                    clipped[d] = max(self.min_weight, clipped[d] - cut)
-
-        return clipped
+        For budgets below n * min_weight, the largest feasible common floor
+        is target_sum / n. A zero budget therefore remains zero.
+        """
+        if not weights:
+            return {}
+        floor = min(self.min_weight, target_sum / len(weights))
+        remaining = dict(weights)
+        out: dict[str, float] = {}
+        budget = target_sum
+        while remaining:
+            total = sum(remaining.values())
+            scaled = {d: (v * budget / total if total > 0 else budget / len(remaining))
+                      for d, v in remaining.items()}
+            below = [d for d, v in scaled.items() if v < floor]
+            if not below:
+                out.update(scaled)
+                break
+            for d in below:
+                out[d] = floor
+                budget -= floor
+                del remaining[d]
+        return out
 
     @property
     def history(self) -> list[OrchestratorUpdate]:
@@ -208,7 +211,7 @@ class Orchestrator:
     def to_dict(self) -> dict:
         return {
             "enabled": self.enabled,
-            "algorithm": "importance_vote_gradient",
+            "algorithm": "normalized_importance_votes",
             "update_every": self.update_every,
             "min_weight": self.min_weight,
             "updates": [u.to_dict() for u in self._history],

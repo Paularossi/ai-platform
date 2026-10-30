@@ -3,16 +3,10 @@ core/db.py
 
 Persistent debate log for Agent 0 mode, backed by Supabase (Postgres).
 
-Four tables: the debate itself (including the final brief, since History
-lets you view any past debate's full brief), who was on the panel (with
-final ECU balance), how each round unfolded, and what quality dimensions
-Agent 0 invented.
-
-Full contribution text, per-agent per-dimension scores, and the raw prompt
-log are NOT stored here - they're only ever available via the UI's
-transcript/full-log downloads, generated at run time. The final brief is
-the one piece of narrative text kept in full, since "read a past debate's
-brief" is a real feature (see get_debate_brief / app/pages/6_History.py).
+Debates, rounds, dimensions and roster rows describe each experiment.
+llm_calls stores prompts, answer text, failures, effective settings and token
+usage for every request, including Agent 0 initialization and final briefs.
+Thinking text and the entire result JSON are not duplicated in the database.
 
 This module is only used by the live Streamlit app (see app/pages/5_Run.py
 and app/pages/6_History.py). The batch runner (experiments/run_experiment.py)
@@ -21,7 +15,10 @@ is untouched - it keeps writing local JSON files as before.
 
 from __future__ import annotations
 
+from core.llm.providers import uses_default_temperature
+
 import os
+from contextlib import contextmanager
 from typing import Any
 
 import psycopg2
@@ -41,7 +38,8 @@ CREATE TABLE IF NOT EXISTS debates (
     num_rounds          INTEGER,
     num_turns           INTEGER,
     ended_reason        TEXT,
-    final_brief         TEXT
+    final_brief         TEXT,
+    status              TEXT NOT NULL DEFAULT 'completed'
 );
 
 CREATE TABLE IF NOT EXISTS rounds (
@@ -60,7 +58,7 @@ CREATE TABLE IF NOT EXISTS ecu_dimensions (
     label              TEXT,
     rubric             TEXT,
     initial_ecu_weight DOUBLE PRECISION,  -- set by Agent 0 at initialization
-    final_ecu_weight   DOUBLE PRECISION,  -- after the Orchestrator's gradient updates
+    final_ecu_weight   DOUBLE PRECISION,  -- after the Orchestrator's vote-based updates
     sw_weight          DOUBLE PRECISION   -- fixed for the whole debate (never optimised)
 );
 
@@ -81,7 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_ecu_dimensions_debate_id ON ecu_dimensions(debate
 CREATE INDEX IF NOT EXISTS idx_agents_debate_id ON agents(debate_id);
 """
 
-# Columns/tables added (or removed) after the first version of this schema.
+# Additive schema changes for existing databases.
 # Using IF NOT EXISTS / IF EXISTS everywhere (rather than assuming a clean
 # database) means this file stays the single source of truth whether a
 # project is brand new or already has an older version of these tables.
@@ -95,14 +93,7 @@ ALTER TABLE debates
     ADD COLUMN IF NOT EXISTS coalition_threshold    DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS final_social_welfare   DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS final_brief            TEXT,
-    -- Full result JSON is not stored here: it's by far the largest thing
-    -- this table would hold, and nothing needs to query it as JSONB - the
-    -- UI's downloads are generated fresh at run time.
-    DROP COLUMN IF EXISTS full_result,
-    DROP COLUMN IF EXISTS final_brief_preview,
-    DROP COLUMN IF EXISTS base_instructions,
-    DROP COLUMN IF EXISTS guideline_notes,
-    DROP COLUMN IF EXISTS design_reasoning;
+    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed';
 """
 
 _ALTER_ROUNDS = """
@@ -119,12 +110,28 @@ ALTER TABLE agents
     ADD COLUMN IF NOT EXISTS final_balance DOUBLE PRECISION;
 """
 
-# ecu_balances was a separate table with exactly one non-key column
-# (final_balance), in a 1:1 relationship with agents on (debate_id,
-# agent_name) - i.e. it should always have been a column on `agents`,
-# not its own table. Dropped in favour of agents.final_balance above.
-_DROP_LEGACY_TABLES = """
-DROP TABLE IF EXISTS ecu_balances;
+_CREATE_CALLS = """
+CREATE TABLE IF NOT EXISTS llm_calls (
+    call_id UUID PRIMARY KEY,
+    debate_id BIGINT NOT NULL REFERENCES debates(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL,
+    cycle INTEGER,
+    agent_name TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    system_prompt TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    response TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    error TEXT,
+    stop_reason TEXT,
+    duration_ms INTEGER,
+    parameters JSONB NOT NULL DEFAULT '{}',
+    usage JSONB NOT NULL DEFAULT '{}',
+    diagnostics JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_debate ON llm_calls(debate_id, created_at);
 """
 
 
@@ -139,6 +146,7 @@ def _get_db_url() -> str | None:
     return os.environ.get("SUPABASE_DB_URL")
 
 
+@contextmanager
 def get_connection():
     """Open a new connection to the Supabase Postgres database. Raises if no URL is configured."""
     db_url = _get_db_url()
@@ -147,18 +155,23 @@ def get_connection():
             "SUPABASE_DB_URL is not set. Add it to .streamlit/secrets.toml locally, "
             "or to the app's Secrets panel on Streamlit Cloud."
         )
-    return psycopg2.connect(db_url)
+    conn = psycopg2.connect(db_url, connect_timeout=10)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def ensure_schema() -> None:
-    """Create the tables if needed and add/remove any columns an existing database is missing."""
+    """Create the tables if needed and add any columns an existing database is missing."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(_CREATE_TABLES)
             cur.execute(_ALTER_DEBATES)
             cur.execute(_ALTER_ROUNDS)
             cur.execute(_ALTER_AGENTS)
-            cur.execute(_DROP_LEGACY_TABLES)
+            cur.execute(_CREATE_CALLS)
         conn.commit()
 
 
@@ -180,8 +193,9 @@ def _build_agent_registry(design: dict[str, Any], rounds: list[dict[str, Any]]) 
     for r in rounds:
         cycle = r["cycle"]
         roster_by_name = {a["name"]: a for a in r.get("roster", [])}
+        added_specs = {a["name"]: a for a in r.get("agents_added_specs", [])}
         for name in r.get("agents_added", []):
-            spec = roster_by_name.get(name, {})
+            spec = added_specs.get(name) or roster_by_name.get(name, {})
             registry[name] = {
                 "role": spec.get("role"), "provider": spec.get("provider"), "model": spec.get("model"),
                 "added_cycle": cycle, "removed_cycle": None,
@@ -193,7 +207,7 @@ def _build_agent_registry(design: dict[str, Any], rounds: list[dict[str, Any]]) 
     return registry
 
 
-def save_experiment(result: dict[str, Any], cfg: dict[str, Any]) -> int:
+def save_experiment(result: dict[str, Any], cfg: dict[str, Any], debate_id: int | None = None) -> int:
     """
     Insert one Agent 0 debate result: the debate row (including its final
     brief), its panel (with final ECU balance), its ECU dimensions, and its
@@ -209,20 +223,42 @@ def save_experiment(result: dict[str, Any], cfg: dict[str, Any]) -> int:
             cur.execute(
                 """
                 INSERT INTO debates
-                    (topic, az_provider, az_model, az_temperature,
+                    (id, topic, az_provider, az_model, az_temperature,
                      max_rounds, max_agents, max_total_spawns,
                      num_rounds, num_turns, ended_reason, final_brief,
                      initial_roster_size, final_roster_size, final_social_welfare,
                      visibility_mode, review_depth, info_condition, coalition_threshold)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                VALUES (COALESCE(%s, nextval(pg_get_serial_sequence('debates', 'id'))),
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    topic = EXCLUDED.topic,
+                    az_provider = EXCLUDED.az_provider,
+                    az_model = EXCLUDED.az_model,
+                    az_temperature = EXCLUDED.az_temperature,
+                    max_rounds = EXCLUDED.max_rounds,
+                    max_agents = EXCLUDED.max_agents,
+                    max_total_spawns = EXCLUDED.max_total_spawns,
+                    num_rounds = EXCLUDED.num_rounds,
+                    num_turns = EXCLUDED.num_turns,
+                    ended_reason = EXCLUDED.ended_reason,
+                    final_brief = EXCLUDED.final_brief,
+                    initial_roster_size = EXCLUDED.initial_roster_size,
+                    final_roster_size = EXCLUDED.final_roster_size,
+                    final_social_welfare = EXCLUDED.final_social_welfare,
+                    visibility_mode = EXCLUDED.visibility_mode,
+                    review_depth = EXCLUDED.review_depth,
+                    info_condition = EXCLUDED.info_condition,
+                    coalition_threshold = EXCLUDED.coalition_threshold,
+                    status = 'completed'
                 RETURNING id
                 """,
                 (
-                    topic,
+                    debate_id, topic,
                     az_cfg.get("provider"),
                     az_cfg.get("model"),
-                    az_cfg.get("temperature"),
+                    (None if uses_default_temperature(az_cfg.get("provider", ""), az_cfg.get("model", ""))
+                     else az_cfg.get("temperature")),
                     az_cfg.get("max_rounds"),
                     az_cfg.get("max_agents"),
                     az_cfg.get("max_total_spawns"),
@@ -231,7 +267,7 @@ def save_experiment(result: dict[str, Any], cfg: dict[str, Any]) -> int:
                     result.get("ended_reason"),
                     result.get("final_brief"),
                     len(result.get("initial_roster", [])),
-                    len(rounds[-1]["roster"]) if rounds else None,
+                    len(result["final_roster"]) if "final_roster" in result else (len(rounds[-1]["roster"]) if rounds else None),
                     rounds[-1]["social_welfare"] if rounds else None,
                     design.get("visibility_mode"),
                     design.get("review_depth"),
@@ -240,6 +276,8 @@ def save_experiment(result: dict[str, Any], cfg: dict[str, Any]) -> int:
                 ),
             )
             debate_id = cur.fetchone()[0]
+            for table in ("ecu_dimensions", "agents", "rounds"):
+                cur.execute(f"DELETE FROM {table} WHERE debate_id = %s", (debate_id,))
 
             final_weights = result.get("final_ecu_weights", {})
             dim_rows = [
@@ -312,6 +350,9 @@ def save_experiment(result: dict[str, Any], cfg: dict[str, Any]) -> int:
                     """,
                     round_rows,
                 )
+            for call in result.get("debug", {}).get("prompt_log", []):
+                if call.get("call_id"):
+                    _insert_call(cur, debate_id, call)
         conn.commit()
 
     return debate_id
@@ -326,7 +367,7 @@ def list_debates(limit: int = 50) -> list[dict[str, Any]]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, created_at, topic, az_provider, az_model, az_temperature,
+                SELECT id, created_at, topic, az_provider, az_model, az_temperature, status,
                        max_rounds, max_agents, num_rounds, num_turns, ended_reason,
                        initial_roster_size, final_roster_size, final_social_welfare,
                        visibility_mode, review_depth, info_condition, coalition_threshold
@@ -346,3 +387,49 @@ def get_debate_brief(debate_id: int) -> str | None:
             cur.execute("SELECT final_brief FROM debates WHERE id = %s", (debate_id,))
             row = cur.fetchone()
             return row[0] if row else None
+
+
+def begin_experiment(cfg):
+    """Create the parent row before any API calls, retaining interrupted runs."""
+    az = cfg.get("agent_zero", {})
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO debates
+                (topic, az_provider, az_model, max_rounds, max_agents, max_total_spawns, status)
+                VALUES (%s, %s, %s, %s, %s, %s, 'running') RETURNING id""",
+                (cfg.get("task", {}).get("description", ""), az.get("provider"), az.get("model"),
+                 az.get("max_rounds"), az.get("max_agents"), az.get("max_total_spawns")))
+            return cur.fetchone()[0]
+
+
+def _insert_call(cur, debate_id, call):
+    diagnostics = {k: call[k] for k in ("request_id", "response_id", "block_types") if call.get(k) is not None}
+    cur.execute("""INSERT INTO llm_calls
+        (call_id, debate_id, created_at, cycle, agent_name, phase, provider, model,
+         system_prompt, prompt, response, status, error, stop_reason, duration_ms, parameters, usage, diagnostics)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (call_id) DO UPDATE SET status=EXCLUDED.status, error=EXCLUDED.error""",
+        (call["call_id"], debate_id, call["created_at"], call.get("cycle"), call.get("agent", "Unknown"),
+         call.get("phase", "unknown"), call["provider"], call["model"], call.get("system_prompt", ""),
+         call.get("prompt", ""), call.get("response", ""), call["status"], call.get("error"),
+         call.get("stop_reason"), call.get("duration_ms"), psycopg2.extras.Json(call.get("parameters") or {}),
+         psycopg2.extras.Json(call.get("usage") or {}), psycopg2.extras.Json(diagnostics)))
+
+
+def save_call(debate_id, call):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            _insert_call(cur, debate_id, call)
+
+
+def mark_experiment_failed(debate_id):
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE debates SET status = 'failed' WHERE id = %s", (debate_id,))
+
+
+def get_debate_calls(debate_id):
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM llm_calls WHERE debate_id = %s ORDER BY created_at", (debate_id,))
+            return [dict(row) for row in cur.fetchall()]

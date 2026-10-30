@@ -18,7 +18,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.providers import API_KEY_ENV_VARS, PROVIDER_MODELS, PROVIDERS
+from dotenv import load_dotenv
+load_dotenv(ROOT / ".env")
+
+from core.llm.providers import API_KEY_ENV_VARS, PROVIDER_MODELS, PROVIDERS, uses_default_temperature, reset_provider
 
 
 def init_state() -> None:
@@ -26,9 +29,10 @@ def init_state() -> None:
         "az_topic": "",
         "az_brief_instructions": "",
         "az_provider": "Anthropic",
-        "az_model": "claude-sonnet-4-6",
+        "az_model": "claude-sonnet-5-5",
         "az_temperature": 0.0,
         "az_max_rounds": 10,
+        "az_review_checks": True,
         "az_max_agents": 6,
         "az_max_total_spawns": 8,
     }
@@ -77,7 +81,7 @@ with st.container(border=True):
     st.subheader("Moderator")
     st.caption(
         "Agent 0 runs the debate: it picks who takes part, decides what they are scored on, "
-        "and calls the debate when it's done. Panel members are drawn from OpenAI's and Anthropic's models. "
+        "and calls the debate when it's done. Panel members can use OpenAI, Anthropic, and Google models. "
     )
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -101,7 +105,17 @@ with st.container(border=True):
             help="0 keeps Agent 0's decisions consistent. Higher values add variety. "
                  "A few models don't support this and will run at their own default.",
             key="widget_temperature",
+            disabled=uses_default_temperature(st.session_state.az_provider, st.session_state.az_model),
         )
+
+        if uses_default_temperature(st.session_state.az_provider, st.session_state.az_model):
+            st.caption("This model uses its default temperature.")
+
+st.session_state.az_review_checks = st.checkbox(
+    "Include hallucination and risk peer assessments", value=st.session_state.az_review_checks,
+    help="Collect suspected factual issues and risk-reasoning quality separately from ECU scores. These are peer judgments, not verified facts.",
+    key="widget_review_checks",
+)
 
 with st.expander("Limits"):
     st.caption(
@@ -128,9 +142,9 @@ with st.expander("Limits"):
 
 with st.container(border=True):
     st.subheader("API keys")
-    used_providers = sorted({"OpenAI", "Anthropic", st.session_state.az_provider})
+    st.caption("One key per provider covers all its models. Set all three so Agent 0 can choose across providers.")
     api_keys: dict[str, str] = {}
-    for provider in used_providers:
+    for provider in PROVIDERS:
         env_var = API_KEY_ENV_VARS.get(provider, f"{provider.upper()}_API_KEY")
         if os.environ.get(env_var):
             st.success(f"{provider} key set", icon=":material/check_circle:")
@@ -146,9 +160,14 @@ topic_ready = bool(st.session_state.az_topic.strip())
 if not topic_ready:
     st.warning("Enter a topic to start.")
 
-if st.button("Start debate", type="primary", disabled=not topic_ready, use_container_width=True):
+keys_ready = all(os.environ.get(API_KEY_ENV_VARS[p]) or api_keys.get(p) for p in PROVIDERS)
+if not keys_ready:
+    st.info("Set a key for each provider before starting.")
+
+if st.button("Start debate", type="primary", disabled=not (topic_ready and keys_ready), use_container_width=True):
     for provider, key in api_keys.items():
         if key:
+            reset_provider(provider)
             os.environ[API_KEY_ENV_VARS.get(provider, f"{provider.upper()}_API_KEY")] = key
 
     st.session_state.experiment_config = {
@@ -163,10 +182,13 @@ if st.button("Start debate", type="primary", disabled=not topic_ready, use_conta
             "provider": st.session_state.az_provider,
             "model": st.session_state.az_model,
             "temperature": float(st.session_state.get("az_temperature", 0.0)),
+            "review_checks_enabled": bool(st.session_state.az_review_checks),
             "max_rounds": int(st.session_state.az_max_rounds),
             "max_agents": int(st.session_state.az_max_agents),
             "max_total_spawns": int(st.session_state.az_max_total_spawns),
         },
     }
     st.session_state.pop("az_result", None)
+    st.session_state.pop("az_pending_calls", None)
+    st.session_state.pop("az_save_error", None)
     st.switch_page("pages/5_Run.py")

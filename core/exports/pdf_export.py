@@ -210,15 +210,8 @@ def brief_to_pdf_bytes(brief_text: str, topic: str) -> bytes:
             heading_text = paragraph_buffer.pop()
             style = h2_style if _SETEXT_EQ_RE.match(line) else h3_style
             story.append(Paragraph(_inline_markdown_to_html(heading_text), style))
-        elif _SETEXT_EQ_RE.match(line):
-            # A stray === with nothing (or a multi-line paragraph) above it:
-            # render a rule rather than leaking literal equals signs into text.
-            flush_paragraph(); flush_list()
-            story.append(HRFlowable(
-                width="100%", thickness=0.6, color=colors.HexColor("#cccccc"),
-                spaceBefore=10, spaceAfter=10,
-            ))
-        elif _THEMATIC_BREAK_RE.match(line):
+        elif _SETEXT_EQ_RE.match(line) or _THEMATIC_BREAK_RE.match(line):
+            # A thematic break or stray === renders as a rule.
             flush_paragraph(); flush_list()
             story.append(HRFlowable(
                 width="100%", thickness=0.6, color=colors.HexColor("#cccccc"),

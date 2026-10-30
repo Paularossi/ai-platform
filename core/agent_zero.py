@@ -30,8 +30,11 @@ cost or an infinite loop.
 from __future__ import annotations
 
 from typing import Any
+import math
+from core.llm.call_log import invoke
+from core.llm.providers import PROVIDER_MODELS
 
-from core.providers import get_provider
+from core.llm.providers import get_provider
 
 # ---------------------------------------------------------------------------
 # Standing pre-prompt — Agent 0's fixed mandate
@@ -57,7 +60,9 @@ review. For each: a name, a label, a scoring rubric (0-1), an ECU weight (agent 
 and an SW weight (social welfare valuation). Decide however many dimensions and whatever \
 weights you judge appropriate for evaluating contributions on this topic. Exactly one \
 dimension must be named "consensus" — its score is used mechanically to detect coalition \
-formation between agents; its rubric, weight, and meaning are otherwise yours to define.
+formation between agents. Its label and rubric are fixed by the platform: score agreement
+with the reviewer's own current position, from 0 (incompatible) to 1 (fully compatible).
+Its ECU and SW weights remain yours to choose.
 5. COALITION THRESHOLD — the minimum mutual consensus score two agents need for them to \
 be counted as a coalition.
 6. VISIBILITY (φ1) — what each agent sees of others' contributions before writing their \
@@ -90,8 +95,8 @@ previous rounds, and a short per-agent trajectory note (how similar their contri
 to their own previous round, and their ECU trend).
 
 For every agent (initial roster or newly added), you must choose exactly one of these \
-two provider/model pairs: OpenAI/gpt-4o or Anthropic/claude-sonnet-4-6. Do not propose \
-any other provider or model.
+provider/model combinations: {provider_models}. Do not propose \
+any other provider or model. You may mix all three providers on the panel.
 
 The roster has a hard capacity each round, shown to you as "roster: X/Y". If the roster \
 is already full, an addition will only take effect if you also remove an agent in the \
@@ -112,15 +117,14 @@ continue regardless of your reasoning, so do not shortchange it."""
 
 
 DEFAULT_PROVIDER = "OpenAI"
-DEFAULT_MODEL = "gpt-4o"
+DEFAULT_MODEL = "gpt-6-luna"
 
-# The only provider/model pairs Agent 0 is allowed to assign to an agent.
-# Keeps the roster restricted to models we've validated for this mode and
-# avoids provider-name casing mismatches (get_provider() is case-sensitive).
-ALLOWED_PROVIDER_MODELS: dict[str, str] = {
-    "OpenAI": "gpt-4o",
-    "Anthropic": "claude-sonnet-4-6",
-}
+# Menus, prompts, schemas and validation share the same supported combinations.
+ALLOWED_PROVIDER_MODELS = PROVIDER_MODELS
+AGENT_ZERO_SYSTEM_PROMPT = AGENT_ZERO_SYSTEM_PROMPT.replace(
+    "{provider_models}",
+    "; ".join(f"{p}: {', '.join(models)}" for p, models in PROVIDER_MODELS.items()),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +137,7 @@ _AGENT_SPEC_SCHEMA = {
         "name": {"type": "string"},
         "role": {"type": "string"},
         "provider": {"type": "string", "enum": list(ALLOWED_PROVIDER_MODELS.keys())},
-        "model": {"type": "string", "enum": list(ALLOWED_PROVIDER_MODELS.values())},
+        "model": {"type": "string", "enum": [m for models in ALLOWED_PROVIDER_MODELS.values() for m in models]},
     },
     "required": ["name", "role", "provider", "model"],
     "additionalProperties": False,
@@ -245,9 +249,10 @@ def _default_ecu_dimensions() -> list[dict]:
          "rubric": "Is the contribution clearly written and easy to understand? "
                     "0 = ambiguous or poorly structured; 1 = precise and well-structured."},
         {"name": "consensus", "label": "Consensus", "weight": 1.0, "sw_weight": 1.0,
-         "rubric": "Does the contribution constructively advance group agreement or "
-                    "productively engage with opposing views? "
-                    "0 = purely divisive; 1 = constructively bridges perspectives."},
+         "rubric": "How compatible is this contribution's substantive position with your own "
+                    "current position? 0 = incompatible positions; 0.5 = partial agreement "
+                    "with material differences; 1 = fully compatible positions. "
+                    "Assess agreement, not writing quality, politeness or factual correctness."},
     ]
 
 
@@ -255,8 +260,8 @@ def _validate_ecu_dimensions(raw: Any) -> list[dict]:
     """
     Validate Agent 0's proposed dimensions. Ensures exactly one dimension is
     named "consensus" (mechanically required — CoalitionTracker reads this
-    dimension specifically) without otherwise constraining what Agent 0
-    chooses to measure or how it weights it.
+    dimension specifically), with a fixed agreement rubric. Other dimensions
+    and all weights remain configurable.
     """
     dims: list[dict] = []
     seen: set[str] = set()
@@ -274,6 +279,11 @@ def _validate_ecu_dimensions(raw: Any) -> list[dict]:
                 sw_weight = float(item.get("sw_weight", 1.0))
             except (TypeError, ValueError):
                 weight, sw_weight = 1.0, 1.0
+            weight = weight if math.isfinite(weight) else 1.0
+            sw_weight = sw_weight if math.isfinite(sw_weight) else 1.0
+            if name == "consensus":
+                canonical = _default_ecu_dimensions()[-1]
+                label, rubric = canonical["label"], canonical["rubric"]
             dims.append({"name": name, "label": label, "rubric": rubric,
                          "weight": max(0.0, weight), "sw_weight": max(0.0, sw_weight)})
             seen.add(name)
@@ -289,7 +299,7 @@ def _validate_coalition_threshold(raw: Any) -> float:
         v = float(raw)
     except (TypeError, ValueError):
         return 0.6
-    return min(1.0, max(0.0, v))
+    return min(1.0, max(0.0, v)) if math.isfinite(v) else 0.6
 
 
 # guards against a truncated/empty final_brief (e.g. the model ran out of max_tokens mid-sentence)
@@ -322,7 +332,9 @@ def _normalize_provider_model(raw_provider: Any, raw_model: Any) -> tuple[str, s
     provider_str = str(raw_provider or "").strip().lower()
     for canonical in ALLOWED_PROVIDER_MODELS:
         if canonical.lower() == provider_str:
-            return canonical, ALLOWED_PROVIDER_MODELS[canonical]
+            models = ALLOWED_PROVIDER_MODELS[canonical]
+            model = next((m for m in models if m.lower() == str(raw_model or "").strip().lower()), models[0])
+            return canonical, model
     return DEFAULT_PROVIDER, DEFAULT_MODEL
 
 
@@ -431,7 +443,7 @@ class AgentZero:
     def __init__(
         self,
         provider: str = "Anthropic",
-        model: str = "claude-opus-4-8",
+        model: str = "claude-sonnet-5-5",
         max_agents: int = 6,
         dry_run: bool = False,
         temperature: float = 0.0,
@@ -440,10 +452,12 @@ class AgentZero:
         self.model = model
         self.max_agents = max_agents
         self.dry_run = dry_run
-        # Applies to whichever provider is set. Anthropic auto-retries without
-        # temperature if a given model rejects it on this call path — see
-        # AnthropicProvider.complete_structured() in providers.py.
         self.temperature = temperature
+        self.cycle: int | None = None
+
+    def _complete_structured(self, phase, **kwargs):
+        return invoke(get_provider(self.provider), "complete_structured", "Agent0",
+                      f"agent_zero_{phase}", self.cycle, **kwargs)
 
     # ------------------------------------------------------------------
     def initialize(self, topic: str, brief_instructions: str = "") -> dict:
@@ -496,7 +510,7 @@ class AgentZero:
             "as described in your instructions."
         )
         try:
-            result = get_provider(self.provider).complete_structured(
+            result = self._complete_structured("initialization",
                 model=self.model,
                 system_prompt=AGENT_ZERO_SYSTEM_PROMPT,
                 user_message=prompt,
@@ -611,7 +625,12 @@ class AgentZero:
         if sw_history:
             sw_str = ", ".join(f"r{e['cycle']+1}={e['social_welfare']:.4f}" for e in sw_history)
             lines.append(f"Social welfare trajectory: {sw_str}")
-            lines.append(f"Current social welfare: {sw_history[-1]['social_welfare']:.4f}")
+        current_sw = next((e for e in reversed(sw_history) if e["cycle"] == cycle), None)
+        if current_sw is not None:
+            lines.append(f"Current social welfare: {current_sw['social_welfare']:.4f}")
+        else:
+            lines.append("Current social welfare: unavailable (no usable reviews this round).")
+        lines.append("Social welfare here is an internal peer-score aggregate, not verified policy impact.")
         lines.append("")
 
         if coalition_state and len(coalition_state) >= 2:
@@ -639,7 +658,7 @@ class AgentZero:
             return _noop_decision("dry-run")
 
         try:
-            result = get_provider(self.provider).complete_structured(
+            result = self._complete_structured("decision",
                 model=self.model,
                 system_prompt=AGENT_ZERO_SYSTEM_PROMPT,
                 user_message=context,
@@ -675,7 +694,7 @@ class AgentZero:
             return fallback_summary
 
         try:
-            result = get_provider(self.provider).complete_structured(
+            result = self._complete_structured("final_brief",
                 model=self.model,
                 system_prompt=AGENT_ZERO_SYSTEM_PROMPT,
                 user_message=(
