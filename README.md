@@ -306,8 +306,8 @@ This expands on the two file kinds the batch runner writes to `experiments/resul
 
 ```bash
 python -m unittest discover -s tests
-python scripts/check_models.py --all                 # preview only, no paid calls
-python scripts/check_models.py --all --live          # paid checks, using the app's peer-review path
+python tests/check_models.py --all                 # preview only, no paid calls
+python tests/check_models.py --all --live          # paid checks, using the app's peer-review path
 ```
 
 Offline tests cover the pipeline, all provider adapters, sequential score visibility, failed reviews, roster selection, token accounting and persistence. Live checks exercise contributions, structured Agent 0 decisions and repeated peer reviews. They print request counts and effective output budgets before running. Set the relevant API keys in the environment before running the script.
@@ -341,3 +341,9 @@ Peer reviews use provider-native structured responses, with local validation of 
 Peer-review responses use a reusable array-entry schema to limit grammar complexity as panels grow; target coverage is validated locally. Flagged quotes may differ in whitespace only and are stored as their original source excerpts.
 
 The Debate page exports a standalone HTML transcript containing the panel, rules, all rounds, peer assessments, final brief, balances and expandable API diagnostics.
+
+Web search can be enabled on Setup for panel contributions (off by default), including agents added later. It uses OpenAI Responses web search, Anthropic web search, and Gemini Google Search grounding. Moderator and peer-review calls do not search. Citations appear in contributions; provider search metadata and token usage are saved in API diagnostics, the database, and the HTML/JSON logs. OpenAI/Anthropic allow up to two tool uses per contribution; Gemini query counts are logged but not hard-capped. Search and token fees apply; enabling search does not force its use. Counts across providers are different billing units, not a shared cost estimate.
+
+To include a paid native-search check per model: `python tests/check_models.py --all --web-search --live`. Omit `--live` to preview.
+
+A separate setup toggle lets Agent 0 research a cited shared briefing before designing the panel (one extra model call). Every panel agent receives that briefing, including later additions; later moderator calls do not search. Run-page and HTML summaries show search counts and expandable queries per agent in each round, with Agent 0 setup search shown under Panel and rules. Raw metadata remains in the JSON log and database diagnostics.

@@ -100,27 +100,69 @@ def unpack_peer_reviews(value, targets, collect_votes):
 
 
 def _source_excerpt(quote, contribution):
-    """Allow whitespace changes only, returning the actual source substring."""
+    """Ignore generated source markers and whitespace, preserving source offsets."""
+    def normalized(text):
+        # Only markers emitted by our search renderers, not arbitrary links or words.
+        marker = re.compile(r"\[source(?: \d+)?\](?:\(<https?://[^>\n]+>\))?")
+        omitted = set()
+        for match in marker.finditer(text):
+            omitted.update(range(match.start(), match.end()))
+        # Paired Markdown bold delimiters change presentation, not quoted wording.
+        for match in re.finditer(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", text):
+            omitted.update(range(match.start(), match.start() + 2))
+            omitted.update(range(match.end() - 2, match.end()))
+        chars, offsets = [], []
+        for i, char in enumerate(text):
+            if i in omitted:
+                continue
+            if char.isspace():
+                if chars and chars[-1] != " ":
+                    chars.append(" ")
+                    offsets.append(i)
+            else:
+                chars.append(char)
+                offsets.append(i)
+        return "".join(chars), offsets
+
+    needle, _ = normalized(quote)
+    needle = needle.strip()
+    if not needle:
+        return None
     if quote in contribution:
         return quote
-    pattern = r"\s+".join(re.escape(part) for part in quote.split())
-    match = re.search(pattern, contribution) if pattern else None
-    return match.group(0) if match else None
-
+    haystack, offsets = normalized(contribution)
+    start = haystack.find(needle) if needle else -1
+    return contribution[offsets[start]:offsets[start + len(needle) - 1] + 1] if start >= 0 else None
 
 
 def validate_checks(value, contribution):
-    """Require explicit judgments; never silently turn absent checks into good scores."""
+    """Strict validation retained for callers requiring both assessments."""
     if not isinstance(value, dict):
         raise ValueError("Missing or invalid review_checks")
-    hall, risk = value.get("hallucination"), value.get("risk")
-    if not isinstance(hall, dict) or not isinstance(risk, dict):
-        raise ValueError("Both hallucination and risk assessments are required")
-    if hall.get("status") not in {"concerns_identified", "no_concerns_identified", "not_verifiable", "not_applicable"}:
+    return {"hallucination": _validate_hallucination(value.get("hallucination"), contribution),
+            "risk": _validate_risk(value.get("risk"))}
+
+
+def validate_optional_checks(value, contribution):
+    """A failed optional judgment never discards its sibling or quality scores."""
+    value = value if isinstance(value, dict) else {}
+    result = {}
+    for name, validator in (("hallucination", lambda item: _validate_hallucination(item, contribution)),
+                            ("risk", _validate_risk)):
+        try:
+            result[name] = validator(value.get(name))
+        except (ValueError, TypeError) as exc:
+            result[name] = {"error": str(exc)}
+    return result
+
+
+def _validate_hallucination(hall, contribution):
+    if not isinstance(hall, dict):
+        raise ValueError("Missing or invalid hallucination assessment")
+    if hall.get("status") not in ("concerns_identified", "no_concerns_identified", "not_verifiable", "not_applicable"):
         raise ValueError("Invalid hallucination status")
-    for item in (hall, risk):
-        if not isinstance(item.get("explanation"), str) or not item["explanation"].strip():
-            raise ValueError("Assessment explanations are required")
+    if not isinstance(hall.get("explanation"), str) or not hall["explanation"].strip():
+        raise ValueError("Assessment explanations are required")
     claims = hall.get("flagged_claims")
     if not isinstance(claims, list) or len(claims) > 3:
         raise ValueError("flagged_claims must contain up to three claims")
@@ -136,6 +178,14 @@ def validate_checks(value, contribution):
         verified_claims.append({"claim": excerpt, "reason": claim["reason"]})
     if (hall["status"] == "concerns_identified") != bool(claims):
         raise ValueError("Hallucination status must agree with flagged claims")
+    return {"status": hall["status"], "explanation": hall["explanation"], "flagged_claims": verified_claims}
+
+
+def _validate_risk(risk):
+    if not isinstance(risk, dict):
+        raise ValueError("Missing or invalid risk assessment")
+    if not isinstance(risk.get("explanation"), str) or not risk["explanation"].strip():
+        raise ValueError("Assessment explanations are required")
     if "assessment_quality" not in risk:
         raise ValueError("Risk assessment_quality is required (number or null)")
     score = risk["assessment_quality"]
@@ -144,9 +194,7 @@ def validate_checks(value, contribution):
     concerns = risk.get("concerns")
     if not isinstance(concerns, list) or len(concerns) > 3 or any(not isinstance(c, str) or not c.strip() for c in concerns):
         raise ValueError("Risk concerns must contain up to three nonempty strings")
-    return {"hallucination": {"status": hall["status"], "explanation": hall["explanation"],
-                              "flagged_claims": verified_claims},
-            "risk": {"assessment_quality": score, "explanation": risk["explanation"], "concerns": concerns}}
+    return {"assessment_quality": score, "explanation": risk["explanation"], "concerns": concerns}
 
 
 def review_check_records(reviews):

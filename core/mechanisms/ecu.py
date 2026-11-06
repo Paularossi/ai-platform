@@ -45,7 +45,7 @@ from itertools import combinations
 from typing import Any
 
 from core.state import PeerReviewOutput
-from core.mechanisms.review_checks import CHECK_RUBRIC, CHECK_EXAMPLE, validate_checks
+from core.mechanisms.review_checks import CHECK_RUBRIC, CHECK_EXAMPLE, validate_optional_checks
 
 
 # ---------------------------------------------------------------------------
@@ -337,11 +337,7 @@ class PeerReviewRound:
                     continue
                 entry = parsed[name]
                 if self.review_checks_enabled:
-                    try:
-                        review_checks[name] = validate_checks(entry.get("review_checks"), all_contributions[name])
-                    except ValueError as exc:
-                        # A missing diagnostic must not discard otherwise valid quality scores.
-                        review_checks[name] = {"error": str(exc)}
+                    review_checks[name] = validate_optional_checks(entry.get("review_checks"), all_contributions[name])
                 dim_scores: dict[str, float] = {}
                 for dim in dim_names:
                     try:

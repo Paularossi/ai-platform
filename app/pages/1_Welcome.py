@@ -33,6 +33,8 @@ def init_state() -> None:
         "az_temperature": 0.0,
         "az_max_rounds": 10,
         "az_review_checks": True,
+        "az_web_search": False,
+        "az_setup_search": False,
         "az_max_agents": 6,
         "az_max_total_spawns": 8,
     }
@@ -117,6 +119,20 @@ st.session_state.az_review_checks = st.checkbox(
     key="widget_review_checks",
 )
 
+st.session_state.az_web_search = st.toggle(
+    "Enable web search for panel contributions", value=st.session_state.az_web_search,
+    help="All panel agents may search, including agents added later. "
+         "Search adds provider fees and token costs. ",
+    key="widget_web_search",
+)
+
+st.session_state.az_setup_search = st.toggle(
+    "Enable superagent web search during setup", value=st.session_state.az_setup_search,
+    help="One additional research call before panel design. Its cited briefing is shared with all agents. "
+         "Search and token fees apply. Later moderator decisions and final synthesis do not search.",
+    key="widget_setup_search",
+)
+
 with st.expander("Limits"):
     st.caption(
         "These cap how long and how large the debate can grow, regardless of what "
@@ -172,6 +188,7 @@ if st.button("Start debate", type="primary", disabled=not (topic_ready and keys_
 
     st.session_state.experiment_config = {
         "mode": "agent_zero",
+        "web_search_enabled": bool(st.session_state.az_web_search),
         "task": {
             "description": st.session_state.az_topic.strip(),
             "brief_instructions": st.session_state.az_brief_instructions.strip(),
@@ -179,6 +196,7 @@ if st.button("Start debate", type="primary", disabled=not (topic_ready and keys_
         # "instructions" and "ecu" are left unset here on purpose: Agent 0
         # designs them in its initialization call (see core/agent_zero.py).
         "agent_zero": {
+            "web_search_enabled": bool(st.session_state.az_setup_search),
             "provider": st.session_state.az_provider,
             "model": st.session_state.az_model,
             "temperature": float(st.session_state.get("az_temperature", 0.0)),

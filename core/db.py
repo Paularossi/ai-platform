@@ -403,7 +403,7 @@ def begin_experiment(cfg):
 
 
 def _insert_call(cur, debate_id, call):
-    diagnostics = {k: call[k] for k in ("request_id", "response_id", "block_types") if call.get(k) is not None}
+    diagnostics = {k: call[k] for k in ("request_id", "response_id", "block_types", "web_search") if call.get(k) is not None}
     cur.execute("""INSERT INTO llm_calls
         (call_id, debate_id, created_at, cycle, agent_name, phase, provider, model,
          system_prompt, prompt, response, status, error, stop_reason, duration_ms, parameters, usage, diagnostics)

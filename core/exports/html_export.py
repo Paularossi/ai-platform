@@ -3,6 +3,7 @@ from html import escape
 import json
 
 from markdown_it import MarkdownIt
+from core.llm.search import search_suggestions_frame, search_summary
 
 _MARKDOWN = MarkdownIt("commonmark", {"html": False, "linkify": False}).enable("table").disable("image")
 _STYLE = """
@@ -38,6 +39,13 @@ def _json(value):
     return '<pre>' + _text(json.dumps(value, indent=2, ensure_ascii=False, default=str)) + '</pre>'
 
 
+def _search_table(agents, searches):
+    rows = search_summary(agents, searches)
+    return _table(['Agent', 'Count', 'Unit'], [[r['Agent'], r['Count'], r['Unit']] for r in rows]) + (
+        '<details><summary>Search queries</summary>' + ''.join('<h4>' + _text(r['Agent']) + '</h4><pre>' +
+        _text('\n'.join(r['Queries']) or 'No queries reported') + '</pre>' for r in rows) + '</details>')
+
+
 def run_to_html(result, cfg, save_error=None):
     """Export all run-page content, including every collapsed contribution and API call.
 
@@ -53,6 +61,7 @@ def run_to_html(result, cfg, save_error=None):
              '<header><small>OMAS · Debate transcript</small><h1>' + _text(topic) + '</h1></header>',
              '<div class="topic">' + _table(['Moderator', 'Model', 'Max rounds', 'Max panel size'],
                 [[az.get('provider'), az.get('model'), az.get('max_rounds'), az.get('max_agents')]]) + '</div>']
+    parts.append('<p>Web search for panel contributions: ' + ('enabled' if cfg.get('web_search_enabled') else 'disabled') + '</p>')
     if save_error:
         parts.append('<p class="warning">' + _text(save_error) + '</p>')
     parts.append('<section><h2>Panel and rules</h2>' + _table(['Agent', 'Provider / model', 'Role'],
@@ -61,7 +70,12 @@ def run_to_html(result, cfg, save_error=None):
     parts.append('<h3>Shared instructions</h3>' + _md(design.get('base_instructions')))
     if design.get('guideline_notes'):
         parts.append('<h3>Shared context</h3>' + _md(design['guideline_notes']))
-    parts.append('<h3>Scoring criteria</h3>' + _table(['Dimension', 'Rubric', 'ECU weight', 'SW weight'],
+    if az.get('web_search_enabled'):
+        parts.append('<h3>Superagent setup search</h3>' + _search_table(['Agent0'], {'Agent0': design.get('setup_search', {})})
+                     + search_suggestions_frame(design.get('setup_search', {})))
+        if design.get('setup_search_error'):
+            parts.append('<p class="warning">Setup search failed: ' + _text(design['setup_search_error']) + '</p>')
+    parts.append('<h3>Scoring criteria</h3>'  + _table(['Dimension', 'Rubric', 'ECU weight', 'SW weight'],
         [[d.get('label', d.get('name')), d.get('rubric'), d.get('weight'), d.get('sw_weight')]
          for d in design.get('ecu_dimensions', [])]))
     parts.append(_table(['Visibility', 'Review depth', 'ECU visibility', 'Coalition threshold'],
@@ -74,7 +88,9 @@ def run_to_html(result, cfg, save_error=None):
         for issue in r.get('call_errors', []):
             parts.append('<p class="warning">' + _text(f"{issue.get('agent')} · {issue.get('phase')}: {issue.get('error')}") + '</p>')
         for name, contribution in r.get('contributions', {}).items():
-            parts.append('<article><h3>' + _text(name) + '</h3>' + _md(contribution) + '</article>')
+            parts.append('<article><h3>' + _text(name) + '</h3>' + _md(contribution) + search_suggestions_frame(r.get('web_search', {}).get(name, {})) + '</article>')
+        if r.get('web_search_enabled') or r.get('web_search'):
+            parts.append('<h3>Web searches this round</h3>' + _search_table(r.get('contributions', {}), r.get('web_search', {})))
         scores = r.get('dimension_scores', {})
         if scores:
             dims = sorted({d for values in scores.values() for d in values})
@@ -92,11 +108,17 @@ def run_to_html(result, cfg, save_error=None):
                     parts.append('<p class="warning">Assessment unavailable: ' + _text(c['error']) + '</p>')
                     continue
                 hall, risk = c['hallucination'], c['risk']
-                parts.append('<p><strong>Hallucination:</strong> ' + _text(hall['status'].replace('_', ' ')) + '</p>' + _md(hall['explanation']))
-                for claim in hall['flagged_claims']:
-                    parts.append('<blockquote>' + _text(claim['claim']) + '</blockquote>' + _md(claim['reason']))
-                parts.append('<p><strong>Risk assessment quality:</strong> ' + _text(risk['assessment_quality']) + '</p>' + _md(risk['explanation']))
-                parts.append('<ul>' + ''.join('<li>' + _text(x) + '</li>' for x in risk['concerns']) + '</ul>')
+                if hall.get('error'):
+                    parts.append('<p class="warning">Hallucination assessment unavailable: ' + _text(hall['error']) + '</p>')
+                else:
+                    parts.append('<p><strong>Hallucination:</strong> ' + _text(hall['status'].replace('_', ' ')) + '</p>' + _md(hall['explanation']))
+                    for claim in hall['flagged_claims']:
+                        parts.append('<blockquote>' + _text(claim['claim']) + '</blockquote>' + _md(claim['reason']))
+                if risk.get('error'):
+                    parts.append('<p class="warning">Risk assessment unavailable: ' + _text(risk['error']) + '</p>')
+                else:
+                    parts.append('<p><strong>Risk assessment quality:</strong> ' + _text(risk['assessment_quality']) + '</p>' + _md(risk['explanation']))
+                    parts.append('<ul>' + ''.join('<li>' + _text(x) + '</li>' for x in risk['concerns']) + '</ul>')
             parts.append('</details>')
         parts.append('<h3>ECU weights used this round</h3>' + _table(['Dimension', 'Weight'], r.get('ecu_weights', {}).items()))
         parts.append('<p><strong>Coalition:</strong> ' + _text(', '.join(r.get('coalition', [])) or 'None') + '</p>')
@@ -119,6 +141,6 @@ def run_to_html(result, cfg, save_error=None):
         for label, key in [('System prompt', 'system_prompt'), ('User prompt', 'prompt'), ('Response text', 'response')]:
             parts.append('<h3>' + label + '</h3><pre>' + _text(c.get(key) or '(empty)') + '</pre>')
         parts.append(_json({'parameters': c.get('parameters'), 'usage': c.get('usage'),
-                            'diagnostics': c.get('diagnostics', {k: c.get(k) for k in ('request_id', 'response_id', 'block_types')})}) + '</details>')
+                            'diagnostics': c.get('diagnostics', {k: c.get(k) for k in ('request_id', 'response_id', 'block_types', 'web_search')})}) + '</details>')
     parts.append('</details></main></body></html>')
     return ''.join(parts)

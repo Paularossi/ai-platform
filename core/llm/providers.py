@@ -6,7 +6,7 @@ import re
 from threading import local
 
 from core.llm.call_log import audit_call
-from core.llm.usage import normalize_usage
+from core.llm.usage import normalize_usage, _plain
 
 PROVIDER_MODELS = {
     "OpenAI": ["gpt-6-luna", "gpt-4.1-mini", "gpt-6.1-sol"],
@@ -65,6 +65,7 @@ class LLMProvider:
         self._state.usage = normalize_usage(self.provider, None)
         self._state.response = {}
         self._state.last_call = None
+        self._state.web_search = False
 
     def get_last_usage(self):
         return dict(getattr(self._state, "usage", normalize_usage(self.provider, None)))
@@ -100,7 +101,8 @@ class LLMProvider:
             raise ValueError(f"Model returned no answer text: stop_reason={reason}. Inspect API call diagnostics.")
 
     @audit_call
-    def complete(self, model, system_prompt, user_message, max_tokens=1500, temperature=0.0, json_mode=False):
+    def complete(self, model, system_prompt, user_message, max_tokens=1500, temperature=0.0, json_mode=False, web_search=False):
+        self._state.web_search = bool(web_search)
         return self._request(model, system_prompt, user_message, max_tokens, temperature, None, json_mode)
 
     @audit_call
@@ -123,6 +125,23 @@ class OpenAIProvider(LLMProvider):
 
     def _request(self, model, system_prompt, user_message, max_tokens, temperature, schema, json_mode):
         options = openai_options(model, max_tokens, temperature)
+        if self._state.web_search:
+            options["max_output_tokens"] = options.pop("max_completion_tokens")
+            if "reasoning_effort" in options:
+                options["reasoning"] = {"effort": options.pop("reasoning_effort")}
+            options.update(tools=[{"type": "web_search"}], max_tool_calls=2,
+                           include=["web_search_call.action.sources"])
+            self._parameters(options)
+            response = self._get_client().responses.create(
+                model=model, instructions=system_prompt, input=user_message, **options)
+            raw = _plain(response)
+            self._response(response, response.output_text, response.status, getattr(response, "usage", None))
+            self._state.response["web_search"] = {"output": raw.get("output", []),
+                "search_calls": sum(item.get("type") == "web_search_call" and
+                    item.get("action", {}).get("type") == "search" for item in raw.get("output", []))}
+            self._require_text(response.output_text, response.status, ("completed",))
+            from core.llm.search import openai_text
+            return openai_text(raw.get("output", [])) or response.output_text
         if schema is not None:
             options["response_format"] = {"type": "json_schema", "json_schema": {
                 "name": "decision", "schema": schema, "strict": True}}
@@ -150,6 +169,8 @@ class AnthropicProvider(LLMProvider):
 
     def _request(self, model, system_prompt, user_message, max_tokens, temperature, schema, json_mode):
         options = anthropic_options(model, max_tokens, temperature)
+        if self._state.web_search:
+            options["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}]
         native = (uses_default_temperature("Anthropic", model)
                   or model.startswith(("claude-haiku-4-5", "claude-sonnet-4-5", "claude-sonnet-4-6",
                                        "claude-opus-4-5", "claude-opus-4-6")))
@@ -170,6 +191,12 @@ class AnthropicProvider(LLMProvider):
                 text = json.dumps(blocks[0])
         self._response(response, text, response.stop_reason, getattr(response, "usage", None),
                        [b.type for b in response.content])
+        if self._state.web_search:
+            blocks = _plain(response.content)
+            self._state.response["web_search"] = {"content": blocks,
+                "search_calls": ((_plain(getattr(response, "usage", None)) or {}).get("server_tool_use") or {}).get("web_search_requests")}
+            from core.llm.search import anthropic_text
+            text = anthropic_text(blocks)
         accepted = ("tool_use",) if schema is not None and not native else ("end_turn",)
         self._require_text(text, response.stop_reason, accepted)
         return text
@@ -194,6 +221,8 @@ class GoogleProvider(LLMProvider):
                 "minimal" if model.startswith("gemini-3.5-flash-lite") else "low"}
         if not uses_default_temperature("Google", model):
             options["temperature"] = temperature
+        if self._state.web_search:
+            options["tools"] = [{"google_search": {}}]
         if json_mode:
             options["response_mime_type"] = "application/json"
             if schema is None:
@@ -214,6 +243,12 @@ class GoogleProvider(LLMProvider):
         text = "".join(p.text for p in parts if getattr(p, "text", None) and not getattr(p, "thought", False))
         reason = getattr(candidate, "finish_reason", "NO_CANDIDATES")
         self._response(response, text, reason, getattr(response, "usage_metadata", None))
+        if self._state.web_search:
+            metadata = _plain(getattr(candidate, "grounding_metadata", None)) or {}
+            self._state.response["web_search"] = {"grounding_metadata": metadata,
+                "query_count": len(metadata["web_search_queries"]) if metadata.get("web_search_queries") is not None else None}
+            from core.llm.search import google_text
+            text = google_text(text, metadata)
         self._require_text(text, reason, ("STOP",))
         return text
 

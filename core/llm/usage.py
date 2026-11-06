@@ -27,10 +27,10 @@ def normalize_usage(provider, usage):
     raw = _plain(usage)
     result['raw'] = raw
     if provider == 'OpenAI':
-        input_details = raw.get('prompt_tokens_details') or {}
-        output_details = raw.get('completion_tokens_details') or {}
-        result.update(input_tokens=raw.get('prompt_tokens'),
-                      output_tokens=raw.get('completion_tokens'),
+        input_details = raw.get('prompt_tokens_details', raw.get('input_tokens_details')) or {}
+        output_details = raw.get('completion_tokens_details', raw.get('output_tokens_details')) or {}
+        result.update(input_tokens=raw.get('prompt_tokens', raw.get('input_tokens')),
+                      output_tokens=raw.get('completion_tokens', raw.get('output_tokens')),
                       total_tokens=raw.get('total_tokens'),
                       cached_input_tokens=input_details.get('cached_tokens'),
                       cache_creation_input_tokens=input_details.get('cache_write_tokens'),

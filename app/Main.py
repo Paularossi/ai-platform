@@ -59,6 +59,5 @@ pg = st.navigation([
 pg.run()
 
 # TODO:
-# - add cost estimate?
+# - add web search
 # - show progress bar for deliberation?
-# - show full summary at the end? e.g. final weights, etc.

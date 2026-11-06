@@ -24,6 +24,6 @@ def render_call_diagnostics(calls, key):
             st.markdown(f"**{label}**")
             st.code(c.get(field) or "(empty)", language=None)
         st.json({"parameters": c.get("parameters"), "usage": c.get("usage"),
-                 "diagnostics": c.get("diagnostics", {k: c.get(k) for k in ("request_id", "response_id", "block_types")})}, expanded=False)
+                 "diagnostics": c.get("diagnostics", {k: c.get(k) for k in ("request_id", "response_id", "block_types", "web_search")})}, expanded=False)
         st.download_button("Download API calls (.json)", json.dumps(calls, indent=2, ensure_ascii=False, default=str),
                            file_name="api_calls.json", mime="application/json", key=f"{key}_download")

@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.call_diagnostics import render_call_diagnostics
+from core.llm.search import search_suggestions_frame, search_summary
 from core.exports.pdf_export import brief_to_pdf_bytes
 from core.exports.html_export import run_to_html
 from core.protocols.agent_zero_loop import run_agent_zero_experiment
@@ -85,6 +86,17 @@ def _reasoning_box(label: str, text: str) -> None:
     )
 
 
+def _render_search_summary(agents, searches, enabled=True):
+    rows = search_summary(agents, searches, enabled)
+    st.dataframe(pd.DataFrame([{k: v for k, v in row.items() if k != "Queries"} for row in rows]),
+                 hide_index=True, use_container_width=True)
+    with st.expander("Search queries"):
+        for row in rows:
+            st.markdown(f"**{row['Agent']}**")
+            st.code("\n".join(row["Queries"]) or "No queries reported", language=None)
+    st.caption("Counts use provider-reported units. Missing counts are not treated as zero.")
+
+
 def _render_design(design: dict) -> None:
     """Show what Agent 0 set up, before the debate itself starts."""
     with st.expander("Panel and rules", expanded=True):
@@ -97,8 +109,16 @@ def _render_design(design: dict) -> None:
         st.caption(design.get("base_instructions", ""))
         if design.get("guideline_notes"):
             st.markdown("**Shared context:**")
-            st.caption(design["guideline_notes"])
+            st.markdown(design["guideline_notes"])
 
+        if az_cfg.get("web_search_enabled"):
+            st.markdown("**Superagent setup search**")
+            _render_search_summary(["Agent0"], {"Agent0": design.get("setup_search", {})})
+            if design.get("setup_search_error"):
+                st.warning("Setup search failed: " + design["setup_search_error"])
+            suggestions = search_suggestions_frame(design.get("setup_search", {}))
+            if suggestions:
+                st.markdown(suggestions, unsafe_allow_html=True)
         st.markdown("**Scoring criteria:**")
         dims = design.get("ecu_dimensions", [])
         if dims:
@@ -139,7 +159,13 @@ def _render_round(round_summary: dict, container) -> None:
             for name, text in round_summary["contributions"].items():
                 with st.popover(name, use_container_width=True):
                     st.markdown(text)
+                    suggestions = search_suggestions_frame(round_summary.get("web_search", {}).get(name, {}))
+                    if suggestions:
+                        st.markdown(suggestions, unsafe_allow_html=True)
 
+            if round_summary.get("web_search_enabled") or round_summary.get("web_search"):
+                st.markdown("**Web searches this round**")
+                _render_search_summary(round_summary["contributions"], round_summary.get("web_search", {}))
             dim_scores = round_summary.get("dimension_scores", {})
             if dim_scores:
                 st.markdown("**Peer review scores** (mean per dimension, 0 to 1):")
@@ -162,14 +188,20 @@ def _render_round(round_summary: dict, container) -> None:
                             st.warning(f"Assessment unavailable: {check['error']}")
                             continue
                         hall, risk = check['hallucination'], check['risk']
-                        st.write(f"Hallucination: {hall['status'].replace('_', ' ')}. {hall['explanation']}")
-                        for claim in hall['flagged_claims']:
-                            st.write(f"Flagged claim: {claim['claim']}")
-                            st.caption(claim['reason'])
-                        score = risk['assessment_quality']
-                        st.write(f"Risk assessment quality: {score if score is not None else 'not assessed'}. {risk['explanation']}")
-                        for concern in risk['concerns']:
-                            st.write(concern)
+                        if hall.get("error"):
+                            st.warning("Hallucination assessment unavailable: " + hall["error"])
+                        else:
+                            st.write(f"Hallucination: {hall['status'].replace('_', ' ')}. {hall['explanation']}")
+                            for claim in hall['flagged_claims']:
+                                st.write(f"Flagged claim: {claim['claim']}")
+                                st.caption(claim['reason'])
+                        if risk.get("error"):
+                            st.warning("Risk assessment unavailable: " + risk["error"])
+                        else:
+                            score = risk['assessment_quality']
+                            st.write(f"Risk assessment quality: {score if score is not None else 'not assessed'}. {risk['explanation']}")
+                            for concern in risk['concerns']:
+                                st.write(concern)
 
             weights = round_summary.get("ecu_weights", {})
             if weights:
