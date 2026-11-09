@@ -59,5 +59,4 @@ pg = st.navigation([
 pg.run()
 
 # TODO:
-# - add web search
 # - show progress bar for deliberation?

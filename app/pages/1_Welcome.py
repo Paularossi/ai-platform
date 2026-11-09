@@ -79,6 +79,55 @@ with st.container(border=True):
         key="widget_brief_instructions",
     )
 
+@st.cache_data(show_spinner=False)
+def _extract_upload(name, data):
+    from core.documents import extract_documents
+    return extract_documents(name, data)
+
+
+shared_documents = []
+documents_ready = True
+with st.container(border=True):
+    st.subheader("Shared documents (optional)")
+    st.caption("Selected text is supplied to Agent 0, every panel member and peer reviewer on each call. "
+               "It is included in downloaded logs and transcripts and sent to the panel's providers. "
+               "PDFs use extracted text only, without images or OCR. ZIP files are read locally, not uploaded to model APIs.")
+    uploads = st.file_uploader("Upload source documents", type=["md", "txt", "tex", "bib", "py", "json", "csv", "yaml", "yml", "pdf", "zip"],
+                               accept_multiple_files=True, key="shared_document_uploads")
+    from core.documents import document_context, MAX_BYTES
+    candidates = []
+    if sum(upload.size for upload in uploads) > MAX_BYTES:
+        st.error("Uploads exceed 20 MB in total. Remove some files.")
+        documents_ready = False
+    else:
+        for upload in uploads:
+            try:
+                records, notices = _extract_upload(upload.name, upload.getvalue())
+                candidates.extend(records)
+                if notices:
+                    with st.expander(f"Extraction notices: {upload.name}"):
+                        st.text("\n".join(notices))
+            except (ValueError, ImportError) as exc:
+                st.error(str(exc))
+                documents_ready = False
+    if candidates:
+        selected = st.multiselect("Sources to share", range(len(candidates)), default=list(range(len(candidates))),
+                                  format_func=lambda i: candidates[i]["name"])
+        shared_documents = [candidates[i] for i in selected]
+        try:
+            source_context = document_context(shared_documents)
+            st.caption(f"{len(shared_documents)} sources, {len(source_context):,} characters. "
+                       "Text is sent again with each relevant call and adds input-token costs. "
+                       "The 100,000-character package limit does not guarantee room for a long debate.")
+        except ValueError as exc:
+            st.error(str(exc))
+            documents_ready = False
+        with st.expander("Preview selected extracted text"):
+            for document in shared_documents:
+                st.text(document["name"])
+                st.code(document["text"], language=None)
+
+
 with st.container(border=True):
     st.subheader("Moderator")
     st.caption(
@@ -180,7 +229,7 @@ keys_ready = all(os.environ.get(API_KEY_ENV_VARS[p]) or api_keys.get(p) for p in
 if not keys_ready:
     st.info("Set a key for each provider before starting.")
 
-if st.button("Start debate", type="primary", disabled=not (topic_ready and keys_ready), use_container_width=True):
+if st.button("Start debate", type="primary", disabled=not (topic_ready and keys_ready and documents_ready), use_container_width=True):
     for provider, key in api_keys.items():
         if key:
             reset_provider(provider)
@@ -188,6 +237,7 @@ if st.button("Start debate", type="primary", disabled=not (topic_ready and keys_
 
     st.session_state.experiment_config = {
         "mode": "agent_zero",
+        "shared_documents": shared_documents,
         "web_search_enabled": bool(st.session_state.az_web_search),
         "task": {
             "description": st.session_state.az_topic.strip(),

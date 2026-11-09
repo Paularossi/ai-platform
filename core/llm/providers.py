@@ -136,6 +136,7 @@ class OpenAIProvider(LLMProvider):
                 model=model, instructions=system_prompt, input=user_message, **options)
             raw = _plain(response)
             self._response(response, response.output_text, response.status, getattr(response, "usage", None))
+            self._state.response["incomplete_details"] = raw.get("incomplete_details")
             self._state.response["web_search"] = {"output": raw.get("output", []),
                 "search_calls": sum(item.get("type") == "web_search_call" and
                     item.get("action", {}).get("type") == "search" for item in raw.get("output", []))}

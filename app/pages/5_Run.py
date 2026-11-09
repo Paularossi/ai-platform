@@ -46,6 +46,12 @@ if not cfg or not cfg.get("task", {}).get("description", "").strip():
     st.stop()
 
 topic = cfg["task"]["description"]
+if cfg.get("shared_documents"):
+    with st.expander("Shared source documents"):
+        for document in cfg["shared_documents"]:
+            st.text(document["name"])
+            st.code(document["text"], language=None)
+
 az_cfg = cfg.get("agent_zero", {})
 
 st.title("Debate")
@@ -299,7 +305,7 @@ def _show_nav_buttons() -> None:
             st.rerun()
     with nav2:
         if st.button("Start new debate", use_container_width=True, type="primary"):
-            for key in ("experiment_config", "az_result", "az_topic", "az_brief_instructions", "az_pending_calls", "az_save_error"):
+            for key in ("experiment_config", "az_result", "az_topic", "az_brief_instructions", "az_pending_calls", "az_save_error", "shared_document_uploads"):
                 st.session_state.pop(key, None)
             st.switch_page("pages/1_Welcome.py")
 

@@ -62,6 +62,13 @@ def run_to_html(result, cfg, save_error=None):
              '<div class="topic">' + _table(['Moderator', 'Model', 'Max rounds', 'Max panel size'],
                 [[az.get('provider'), az.get('model'), az.get('max_rounds'), az.get('max_agents')]]) + '</div>']
     parts.append('<p>Web search for panel contributions: ' + ('enabled' if cfg.get('web_search_enabled') else 'disabled') + '</p>')
+    documents = result.get("shared_documents", cfg.get("shared_documents", []))
+    if documents:
+        parts.append('<section><h2>Shared source documents</h2>')
+        for document in documents:
+            parts.append('<details><summary>' + _text(document['name']) + '</summary><small>SHA-256: ' +
+                         _text(document.get('sha256', '')) + '</small><pre>' + _text(document['text']) + '</pre></details>')
+        parts.append('</section>')
     if save_error:
         parts.append('<p class="warning">' + _text(save_error) + '</p>')
     parts.append('<section><h2>Panel and rules</h2>' + _table(['Agent', 'Provider / model', 'Role'],
