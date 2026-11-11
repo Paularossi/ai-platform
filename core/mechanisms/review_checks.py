@@ -72,7 +72,7 @@ def peer_review_schema(dimensions, targets, include_checks, collect_votes):
 
 
 def unpack_peer_reviews(value, targets, collect_votes):
-    """Restore the existing stored format, requiring exactly one entry per target."""
+    """Restore the existing stored format, preserving available target entries."""
     reviews = value.get("reviews")
     if not isinstance(reviews, list):
         raise ValueError("Structured peer review must contain a reviews array")
@@ -91,9 +91,6 @@ def unpack_peer_reviews(value, targets, collect_votes):
             raise ValueError(f"Conflicting duplicate review for {name!r} at entry {index}. "
                              "No scores were overwritten or averaged.")
         result[name] = assessment
-    if set(result) != set(targets):
-        missing = [name for name in targets if name not in result]
-        raise ValueError(f"Missing reviews for: {missing!r}")
     if collect_votes:
         result["importance_votes"] = value.get("importance_votes")
     return result

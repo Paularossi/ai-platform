@@ -234,7 +234,8 @@ class CommunicationHub:
                 contribution=out.contribution if out else None,
                 reviews=round_reviews,
             )
-            earned[agent_name] = record.ecu_earned
+            if record.ecu_earned is not None:
+                earned[agent_name] = record.ecu_earned
 
             # Attach scores back to the AgentOutput for logging
             if out is not None:

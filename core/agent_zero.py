@@ -625,10 +625,10 @@ class AgentZero:
             lines.append(f"ECU balances (cumulative): {bal_str}")
 
         if sw_history:
-            sw_str = ", ".join(f"r{e['cycle']+1}={e['social_welfare']:.4f}" for e in sw_history)
+            sw_str = ", ".join(f"r{e['cycle']+1}={e['social_welfare']}" for e in sw_history)
             lines.append(f"Social welfare trajectory: {sw_str}")
         current_sw = next((e for e in reversed(sw_history) if e["cycle"] == cycle), None)
-        if current_sw is not None:
+        if current_sw is not None and current_sw["social_welfare"] is not None:
             lines.append(f"Current social welfare: {current_sw['social_welfare']:.4f}")
         else:
             lines.append("Current social welfare: unavailable (no usable reviews this round).")

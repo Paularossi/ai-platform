@@ -123,13 +123,16 @@ def run_peer_review_for_agent(
 
     hub.log_prompt(cycle, agent.name, "peer_review", prompt=prompt, response=raw)
     try:
-        return peer_reviewer.parse(
+        review = peer_reviewer.parse(
             reviewer_name=agent.name, cycle=cycle, raw=raw, all_contributions=all_contributions, strict=True,
         )
+        if review.validation_errors and provider is not None:
+            mark_validation_error(provider, "; ".join(review.validation_errors))
+        return review
     except ValueError as exc:
         if provider is not None and not raw.startswith("[ERROR:"):
             mark_validation_error(provider, str(exc))
-        return PeerReviewOutput(reviewer_name=agent.name, cycle=cycle, raw_response=raw)
+        return PeerReviewOutput(reviewer_name=agent.name, cycle=cycle, raw_response=raw, validation_errors=[str(exc)])
 
 
 

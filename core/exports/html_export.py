@@ -98,6 +98,13 @@ def run_to_html(result, cfg, save_error=None):
             parts.append('<article><h3>' + _text(name) + '</h3>' + _md(contribution) + search_suggestions_frame(r.get('web_search', {}).get(name, {})) + '</article>')
         if r.get('web_search_enabled') or r.get('web_search'):
             parts.append('<h3>Web searches this round</h3>' + _search_table(r.get('contributions', {}), r.get('web_search', {})))
+        coverage = r.get('review_coverage', {})
+        if coverage:
+            parts.append('<h3>Valid reviews / expected reviews</h3>' + _table(
+                ['Agent', 'Dimension', 'Coverage'],
+                [[name, dim, f"{count}/{entry['expected']}"] for name, entry in coverage.items()
+                 for dim, count in entry['valid_by_dimension'].items()]))
+            parts.append('<p>Missing scores are unavailable. Incomplete dimension coverage prevents an ECU reward; balances remain unchanged. Social welfare uses available scores and may have unequal coverage.</p>')
         scores = r.get('dimension_scores', {})
         if scores:
             dims = sorted({d for values in scores.values() for d in values})

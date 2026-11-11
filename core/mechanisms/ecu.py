@@ -12,18 +12,14 @@ Components
   dimensions and report a coalition agreement score (0-1) per peer.
   Returns a list of PeerReviewOutput objects.
 
-  ECU formula:
-    ecu_i = sum_q  w_q^ECU * (1/(n-1)) * sum_{j≠i} s_{ji}(q)
+  ECU uses the mean of available valid peer scores separately for each
+  agent and dimension, weighted by ECU weights. A missing dimension leaves
+  the reward unavailable and the balance unchanged. Optional self-assessment
+  blends a valid self-score with the available peer mean using lambda_self.
 
-  Social welfare formula:
-    SW = sum_q w_q^SW * (1/n) * sum_i (1/(n-1)) * sum_{j≠i} s_{ji}(q)
-
-  The SW weights are fixed social-planner valuations. The ECU weights are
-  variable Orchestrator incentives and are the only weights updated by the
-  Orchestrator.
-
-  If self-assessment is enabled, self-scores are included with weight λ:
-    ecu_i = sum_q  w_q * [ λ*s_{ii}(q) + (1/(n-1))*sum_{j≠i} s_{ji}(q) ] / (1 + λ)
+  Social welfare pools available directed scores per dimension with fixed
+  SW weights. If a dimension is entirely missing, SW is unavailable.
+  ECU weights alone are updated by the Orchestrator.
 
   CoalitionTracker
   ----------------
@@ -306,6 +302,7 @@ class PeerReviewRound:
         justifications: dict[str, str] = {}
         importance_votes: dict[str, float] = {}
         review_checks: dict[str, dict] = {}
+        validation_errors = []
 
         try:
             # Strip markdown fences (```json ... ``` or ``` ... ```)
@@ -317,60 +314,45 @@ class PeerReviewRound:
             # Remove trailing commas before closing braces/brackets
             clean = re.sub(r",(\s*[}\]])", r"\1", clean)
             parsed = json.loads(clean)
-            if strict:
-                if not isinstance(parsed, dict):
-                    raise ValueError("Peer review must be a JSON object")
-                for target in review_targets:
-                    entry = parsed.get(target)
-                    if not isinstance(entry, dict):
-                        raise ValueError(f"Missing review for {target}")
-                    for dimension in dim_names:
-                        value = entry.get(dimension)
-                        if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
-                            raise ValueError(f"Invalid or missing score for {target}/{dimension}")
-                votes = parsed.get("importance_votes", {})
-                if not isinstance(votes, dict) or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in votes.values()):
-                    raise ValueError("Invalid importance votes")
+            if not isinstance(parsed, dict):
+                raise ValueError("Peer review must be a JSON object")
 
             for name in review_targets:
-                if name not in parsed:
+                entry = parsed.get(name)
+                if not isinstance(entry, dict):
+                    validation_errors.append(f"Missing or invalid review for {name}")
                     continue
-                entry = parsed[name]
                 if self.review_checks_enabled:
                     review_checks[name] = validate_optional_checks(entry.get("review_checks"), all_contributions[name])
                 dim_scores: dict[str, float] = {}
                 for dim in dim_names:
-                    try:
-                        dim_scores[dim] = max(0.0, min(1.0, float(entry.get(dim, 0.5))))
-                    except (ValueError, TypeError):
-                        dim_scores[dim] = 0.5
+                    value = entry.get(dim)
+                    if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1:
+                        dim_scores[dim] = float(value)
+                    else:
+                        validation_errors.append(f"Unavailable score: {name}/{dim}")
 
                 if name == reviewer_name:
                     self_scores = dim_scores
                 else:
-                    scores[name] = dim_scores
+                    if dim_scores:
+                        scores[name] = dim_scores
                     justifications[name] = str(entry.get("justification", ""))
 
-            # Parse importance votes if present
-            if "importance_votes" in parsed and isinstance(parsed["importance_votes"], dict):
-                raw_votes = parsed["importance_votes"]
-                importance_votes = {
-                    d: max(0.0, float(raw_votes.get(d, 0.0)))
-                    for d in dim_names
-                }
-                total = sum(importance_votes.values())
-                if total > 0:
-                    # Normalise to sum exactly 100
-                    importance_votes = {d: v * 100.0 / total for d, v in importance_votes.items()}
-
+            # Vote failure must not erase valid quality assessments.
+            if "importance_votes" in parsed:
+                votes = parsed["importance_votes"]
+                if isinstance(votes, dict) and all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in votes.values()):
+                    values = {d: votes.get(d, 0.0) for d in dim_names}
+                    total = sum(values.values())
+                    if total > 0 and math.isfinite(total):
+                        importance_votes = {d: v * 100.0 / total for d, v in values.items()}
+                if not importance_votes:
+                    validation_errors.append("Importance votes unavailable")
         except Exception as exc:
             if strict:
                 raise ValueError(f"Invalid peer review: {exc}") from exc
-            print(f"[PeerReviewRound] Parse error for {reviewer_name}: {exc}")
-            for name in review_targets:
-                if name != reviewer_name:
-                    scores[name] = {d: 0.5 for d in dim_names}
-                    justifications[name] = ""
+            validation_errors.append(f"Invalid peer review: {exc}")
 
         # Derive coalition scores from the consensus dimension
         coalition: dict[str, float] = {
@@ -387,6 +369,7 @@ class PeerReviewRound:
             justifications=justifications,
             importance_votes=importance_votes,
             review_checks=review_checks,
+            validation_errors=validation_errors,
             raw_response=raw,
         )
 
@@ -495,7 +478,7 @@ class TurnRecord:
     aggregated_scores: dict[str, float]        # mean per dimension
     ecu_weights: dict[str, float]
     sw_weights: dict[str, float]
-    ecu_earned: float
+    ecu_earned: float | None
     contribution_preview: str
 
     def to_dict(self) -> dict:
@@ -508,7 +491,7 @@ class TurnRecord:
             "aggregated_scores": {k: round(v, 4) for k, v in self.aggregated_scores.items()},
             "ecu_weights": self.ecu_weights,
             "sw_weights": self.sw_weights,
-            "ecu_earned": round(self.ecu_earned, 4),
+            "ecu_earned": round(self.ecu_earned, 4) if self.ecu_earned is not None else None,
             "contribution_preview": self.contribution_preview,
         }
 
@@ -595,26 +578,22 @@ class EcuLedger:
 
         # Aggregate: mean per dimension across peer reviewers
         agg: dict[str, float] = {}
-        n_peers = len(peer_scores)
-
         for dim in self.dim_names:
-            if n_peers > 0:
-                peer_mean = sum(
-                    peer_scores[r].get(dim, 0.5) for r in peer_scores
-                ) / n_peers
-            else:
-                peer_mean = 0.5
-
-            if self.include_self_assessment and self_scores:
-                self_val = self_scores.get(dim, 0.5)
+            values = [v[dim] for v in peer_scores.values() if dim in v
+                      and type(v[dim]) in (int, float) and math.isfinite(v[dim]) and 0 <= v[dim] <= 1]
+            if not values:
+                continue
+            peer_mean = sum(values) / len(values)
+            self_val = (self_scores or {}).get(dim)
+            if (self.include_self_assessment and type(self_val) in (int, float)
+                    and math.isfinite(self_val) and 0 <= self_val <= 1):
                 agg[dim] = (self.lambda_self * self_val + peer_mean) / (1 + self.lambda_self)
             else:
                 agg[dim] = peer_mean
-
-        # ECU_i^(t) = Σ_q w_q^ECU · (1/(n-1))Σ_{j≠i}s_ji^(t)(q)
-        ecu = sum(agg.get(d, 0.0) * self.ecu_weights.get(d, 1.0) for d in self.dim_names)
-
-        self._balances[agent_name] = self._balances.get(agent_name, 0.0) + ecu
+        ecu = (sum(agg[d] * self.ecu_weights.get(d, 1.0) for d in self.dim_names)
+               if all(d in agg for d in self.dim_names) else None)
+        if ecu is not None:
+            self._balances[agent_name] = self._balances.get(agent_name, 0.0) + ecu
 
         contrib_str = (
             contribution if isinstance(contribution, str)
@@ -682,25 +661,27 @@ class EcuLedger:
         for review in reviews:
             for dim_scores in review.scores.values():
                 for dim in self.dim_names:
-                    if dim in dim_scores:
+                    if (dim in dim_scores and type(dim_scores[dim]) in (int, float)
+                            and math.isfinite(dim_scores[dim]) and 0 <= dim_scores[dim] <= 1):
                         by_dim[dim].append(float(dim_scores[dim]))
-        return {dim: (sum(vals) / len(vals) if vals else 0.0) for dim, vals in by_dim.items()}
+        return {dim: sum(vals) / len(vals) for dim, vals in by_dim.items() if vals}
 
-    def compute_social_welfare(self, reviews: list[PeerReviewOutput]) -> float:
+    def compute_social_welfare(self, reviews: list[PeerReviewOutput]) -> float | None:
         """Compute SW^(t) = Σ_q w_q^SW · s̄_q^(t)."""
         means = self.mean_peer_scores(reviews)
-        return sum(self.sw_weights.get(dim, 1.0) * means.get(dim, 0.0) for dim in self.dim_names)
+        return (sum(self.sw_weights.get(dim, 1.0) * means[dim] for dim in self.dim_names)
+                if all(dim in means for dim in self.dim_names) else None)
 
-    def record_social_welfare(self, cycle: int, reviews: list[PeerReviewOutput]) -> float:
+    def record_social_welfare(self, cycle: int, reviews: list[PeerReviewOutput]) -> float | None:
         """Compute and store social welfare for one round."""
         means = self.mean_peer_scores(reviews)
-        sw = sum(self.sw_weights.get(dim, 1.0) * means.get(dim, 0.0) for dim in self.dim_names)
+        sw = self.compute_social_welfare(reviews)
         self._social_welfare_history.append({
             "cycle": cycle,
             "mean_peer_scores": {k: round(v, 4) for k, v in means.items()},
             "sw_weights": dict(self.sw_weights),
             "ecu_weights": dict(self.ecu_weights),
-            "social_welfare": round(sw, 4),
+            "social_welfare": round(sw, 4) if sw is not None else None,
         })
         return sw
 

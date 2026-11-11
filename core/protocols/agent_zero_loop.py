@@ -74,7 +74,7 @@ def _build_agent_notes(
             note = "first contribution"
 
         if ledger:
-            recs = [r for r in ledger.history if r.agent_name == name]
+            recs = [r for r in ledger.history if r.agent_name == name and r.ecu_earned is not None]
             if len(recs) >= 2:
                 delta = recs[-1].ecu_earned - recs[-2].ecu_earned
                 trend = "up" if delta > 0.01 else ("down" if delta < -0.01 else "flat")
@@ -418,6 +418,14 @@ def _run_agent_zero_experiment(
             max_total_spawns=max_total_spawns,
             brief_instructions=brief_instructions,
         )
+        review_coverage = {name: {
+            "expected": max(0, len(hub.agent_names) - 1),
+            "valid_by_dimension": {d["name"]: sum(d["name"] in r.scores.get(name, {}) for r in round_reviews
+                                                   if r.reviewer_name != name)
+                                   for d in ecu_cfg["dimensions"]}}
+            for name in round_contributions}
+        context += "\nReview coverage (missing scores are unavailable, not neutral; incomplete coverage is not evidence of agreement):\n" + json.dumps(review_coverage)
+        context += "\nReview validation issues:\n" + json.dumps({r.reviewer_name: r.validation_errors for r in round_reviews if r.validation_errors})
         context += shared_context
         if ledger:
             context += "\nEvaluation definitions and weights used this round:\n" + json.dumps({
@@ -485,7 +493,7 @@ def _run_agent_zero_experiment(
             rec.agent_name: {k: round(v, 3) for k, v in rec.aggregated_scores.items()}
             for rec in cycle_records
         }
-        ecu_earned_this_round = {rec.agent_name: round(rec.ecu_earned, 3) for rec in cycle_records}
+        ecu_earned_this_round = {rec.agent_name: round(rec.ecu_earned, 3) for rec in cycle_records if rec.ecu_earned is not None}
 
         # ── Compact, human-readable per-round record ─────────────────────
         # Contributions are stored in full here, not truncated: this is the
@@ -500,6 +508,7 @@ def _run_agent_zero_experiment(
                            if c.get("cycle") == cycle and c.get("phase") == "contribution" and c.get("web_search")},
             "agent_trajectory_notes": agent_notes,
             "dimension_scores": dimension_scores,
+            "review_coverage": review_coverage,
             "peer_review_checks": checks,
             "ecu_earned_this_round": ecu_earned_this_round,
             "ecu_balances": dict(hub.ecu_balances),
@@ -586,7 +595,7 @@ def _run_agent_zero_experiment(
             # the same reason (duplicated in prompt_log).
             "peer_review_scores": [
                 {"cycle": p.cycle, "reviewer": p.reviewer_name,
-                 "scores": p.scores, "justifications": p.justifications, "review_checks": p.review_checks}
+                 "scores": p.scores, "justifications": p.justifications, "review_checks": p.review_checks, "validation_errors": p.validation_errors}
                 for p in hub.peer_review_log
             ],
             "coalition_history": coalition.to_dict() if coalition else {},

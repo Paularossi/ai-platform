@@ -184,6 +184,15 @@ def _render_round(round_summary: dict, container) -> None:
                     rows.append(row)
                 st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
+            coverage = round_summary.get("review_coverage", {})
+            if coverage:
+                st.markdown("**Valid reviews / expected reviews**, by dimension")
+                st.dataframe(pd.DataFrame([
+                    {"Agent": name, **{dim: f"{count}/{entry['expected']}"
+                     for dim, count in entry["valid_by_dimension"].items()}}
+                    for name, entry in coverage.items()]), hide_index=True, use_container_width=True)
+                st.caption("Missing scores are unavailable. ECU rewards require a valid mean on every dimension; otherwise balances remain unchanged. Social welfare uses available scores and may have unequal coverage.")
+
             checks = round_summary.get("peer_review_checks", [])
             if checks:
                 with st.expander("Hallucination and risk peer assessments"):
