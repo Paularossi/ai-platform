@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from copy import copy
+from core.llm.providers import DEFAULT_OUTPUT_BUDGET
 from core.mechanisms.review_checks import peer_review_schema, unpack_peer_reviews
 
 from dataclasses import dataclass
@@ -61,7 +62,7 @@ def run_peer_review_for_agent(
     agent_histories: dict[str, list[str]],
     collect_importance_votes: bool,
     dry_run: bool,
-    max_tokens: int = 1600,
+    max_tokens: int = DEFAULT_OUTPUT_BUDGET,
 ) -> PeerReviewOutput:
     """
     Run one agent's peer review call: build the prompt, call its provider,
@@ -108,8 +109,7 @@ def run_peer_review_for_agent(
             model=agent.model,
             system_prompt="You are a helpful assistant evaluating contributions in a deliberation experiment. Read the evaluation instructions carefully and respond with the requested JSON.",
             user_message=prompt,
-            max_tokens=(max_tokens + 500 * len(all_contributions)
-                        if peer_reviewer.review_checks_enabled else max_tokens),
+            max_tokens=max_tokens,
             temperature=agent.temperature,
         )
         try:

@@ -59,4 +59,7 @@ pg = st.navigation([
 pg.run()
 
 # TODO:
+# !!!!!!!!!!!!!!!!!
+# fix the context limit????????? and then just keep trying to generate different sections of the paper
+# check the last downlaoded log file for context length errors
 # - show progress bar for deliberation?

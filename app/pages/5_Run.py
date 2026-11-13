@@ -9,7 +9,6 @@ from __future__ import annotations
 import html
 import json
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -48,9 +47,12 @@ if not cfg or not cfg.get("task", {}).get("description", "").strip():
 topic = cfg["task"]["description"]
 if cfg.get("shared_documents"):
     with st.expander("Shared source documents"):
-        for document in cfg["shared_documents"]:
-            st.text(document["name"])
-            st.code(document["text"], language=None)
+        documents = cfg["shared_documents"]
+        st.caption(f"{len(documents)} source documents. Full text is retained in the downloaded log and transcript.")
+        if st.checkbox("Inspect a source document", key="inspect_run_sources"):
+            selected = st.selectbox("Document", range(len(documents)),
+                                    format_func=lambda i: documents[i]["name"])
+            st.text_area("Source text", documents[selected]["text"], height=300, disabled=True)
 
 az_cfg = cfg.get("agent_zero", {})
 
@@ -184,15 +186,6 @@ def _render_round(round_summary: dict, container) -> None:
                     rows.append(row)
                 st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
-            coverage = round_summary.get("review_coverage", {})
-            if coverage:
-                st.markdown("**Valid reviews / expected reviews**, by dimension")
-                st.dataframe(pd.DataFrame([
-                    {"Agent": name, **{dim: f"{count}/{entry['expected']}"
-                     for dim, count in entry["valid_by_dimension"].items()}}
-                    for name, entry in coverage.items()]), hide_index=True, use_container_width=True)
-                st.caption("Missing scores are unavailable. ECU rewards require a valid mean on every dimension; otherwise balances remain unchanged. Social welfare uses available scores and may have unequal coverage.")
-
             checks = round_summary.get("peer_review_checks", [])
             if checks:
                 with st.expander("Hallucination and risk peer assessments"):
@@ -240,20 +233,11 @@ def _render_round(round_summary: dict, container) -> None:
             _reasoning_box("Agent 0's reasoning", round_summary["agent_zero_reasoning"])
 
 
-def _stream_words(text: str):
-    for word in text.split(" "):
-        yield word + " "
-        time.sleep(0.012)
-
-
 def _show_result(result: dict) -> None:
     st.divider()
     st.subheader("Policy brief")
     with st.container(border=True):
-        if st.session_state.pop("az_stream_brief", False):
-            st.write_stream(_stream_words(result["final_brief"]))
-        else:
-            st.markdown(result["final_brief"])
+        st.markdown(result["final_brief"])
 
     n_rounds = len(result.get("rounds", []))
     st.caption(
@@ -273,7 +257,7 @@ def _show_result(result: dict) -> None:
         st.warning(st.session_state.az_save_error)
 
     timestamp = datetime.now(_AMS).strftime("%Y%m%d_%H%M")
-    dl1, dl2, dl3 = st.columns(3)
+    dl1, dl2, dl3, dl4 = st.columns(4)
     with dl1:
         st.download_button(
             "Download full transcript (.html)",
@@ -302,6 +286,16 @@ def _show_result(result: dict) -> None:
             use_container_width=True,
             help="'rounds' holds the readable per-round record; 'debug' holds raw prompts and scores.",
         )
+    with dl4:
+        st.download_button(
+            "Download LaTeX (.tex)",
+            data=result["final_brief"].encode("utf-8"),
+            file_name=f"agent0_section_{timestamp}.tex",
+            mime="application/x-tex",
+            use_container_width=True,
+            help="Saves the exact final output as UTF-8 text. Request raw LaTeX in the final brief instructions first; this button does not convert or validate it. Compile in Overleaf to check syntax.",
+        )
+
 
 
 def _show_nav_buttons() -> None:
@@ -368,7 +362,6 @@ if "az_result" not in st.session_state:
         render_call_diagnostics(st.session_state.az_pending_calls, "interrupted_run")
         st.stop()
     st.session_state.az_result = result
-    st.session_state.az_stream_brief = True
     try:
         if debate_id is None:
             ensure_schema()

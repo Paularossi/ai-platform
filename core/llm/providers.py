@@ -8,6 +8,9 @@ from threading import local
 from core.llm.call_log import audit_call
 from core.llm.usage import normalize_usage, _plain
 
+# shared application allowance, thinking and visible output can share this budget
+DEFAULT_OUTPUT_BUDGET = 32768
+
 PROVIDER_MODELS = {
     "OpenAI": ["gpt-6-luna", "gpt-4.1-mini", "gpt-6.1-sol"],
     "Anthropic": ["claude-sonnet-5-5", "claude-haiku-4-5"],
@@ -101,12 +104,12 @@ class LLMProvider:
             raise ValueError(f"Model returned no answer text: stop_reason={reason}. Inspect API call diagnostics.")
 
     @audit_call
-    def complete(self, model, system_prompt, user_message, max_tokens=1500, temperature=0.0, json_mode=False, web_search=False):
+    def complete(self, model, system_prompt, user_message, max_tokens=DEFAULT_OUTPUT_BUDGET, temperature=0.0, json_mode=False, web_search=False):
         self._state.web_search = bool(web_search)
         return self._request(model, system_prompt, user_message, max_tokens, temperature, None, json_mode)
 
     @audit_call
-    def complete_structured(self, model, system_prompt, user_message, schema, max_tokens=1500, temperature=0.0):
+    def complete_structured(self, model, system_prompt, user_message, schema, max_tokens=DEFAULT_OUTPUT_BUDGET, temperature=0.0):
         text = self._request(model, system_prompt, user_message, max_tokens, temperature, schema, True)
         parsed = json.loads(text)
         if not isinstance(parsed, dict):
@@ -183,8 +186,11 @@ class AnthropicProvider(LLMProvider):
                 options["tools"] = [{"name": "submit_decision", "description": "Submit the decision.", "input_schema": schema}]
                 options["tool_choice"] = {"type": "tool", "name": "submit_decision"}
         self._parameters(options)
-        response = self._get_client().messages.create(model=model, system=system_prompt,
-            messages=[{"role": "user", "content": user_message}], **options)
+        # The SDK requires streaming for large output allowances. Collect the
+        # final message internally; callers still receive one complete response.
+        with self._get_client().messages.stream(model=model, system=system_prompt,
+                messages=[{"role": "user", "content": user_message}], **options) as stream:
+            response = stream.get_final_message()
         text = "".join(b.text for b in response.content if b.type == "text")
         if schema is not None and not native:
             blocks = [b.input for b in response.content if b.type == "tool_use"]

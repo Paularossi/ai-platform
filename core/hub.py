@@ -95,7 +95,8 @@ class CommunicationHub:
     agent_names : list[str]
         Ordered list of agent names (used for convergence checks).
     ledger : EcuLedger | None
-        If provided, ecu scoring runs after every submission.
+        The protocol calls compute_ecus_for_round after the round's peer reviews.
+        submit() stores contributions; it does not allocate ECUs.
     ecu_info_condition : str
         "transparent"  — agents see ecu balances in their context packet
         "opaque"       — balances are hidden (default)

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from typing import Any
 import math
+from core.llm.providers import DEFAULT_OUTPUT_BUDGET
 from core.llm.call_log import invoke
 from core.llm.providers import PROVIDER_MODELS
 
@@ -517,7 +518,7 @@ class AgentZero:
                 system_prompt=AGENT_ZERO_SYSTEM_PROMPT,
                 user_message=prompt,
                 schema=INIT_SCHEMA,
-                max_tokens=2500,
+                max_tokens=DEFAULT_OUTPUT_BUDGET,
                 temperature=self.temperature,
             )
         except Exception as exc:
@@ -666,7 +667,7 @@ class AgentZero:
                 user_message=context,
                 schema=DECISION_SCHEMA,
                 # Generous headroom: final_brief length is dictated by the topic, not a fixed prescription (see AGENT_ZERO_SYSTEM_PROMPT)
-                max_tokens=6000,
+                max_tokens=DEFAULT_OUTPUT_BUDGET,
                 temperature=self.temperature,
             )
             validated = _validate_decision(result, current_roster, self.max_agents)
@@ -708,7 +709,7 @@ class AgentZero:
                 ),
                 schema=BRIEF_SCHEMA,
                 # See the max_tokens comment in decide() above — same reasoning.
-                max_tokens=4000,
+                max_tokens=DEFAULT_OUTPUT_BUDGET,
                 temperature=self.temperature,
             )
             brief = str(result.get("final_brief", "") or "").strip()

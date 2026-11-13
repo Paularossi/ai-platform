@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from core.llm.providers import DEFAULT_OUTPUT_BUDGET
 from core.llm.call_log import invoke
 from core.hub import ContextPacket
 from core.state import AgentOutput
@@ -277,7 +278,7 @@ class Agent:
                 system_prompt=system_prompt,
                 user_message=user_message,
                 # Allow drafting and reasoning beyond short position statements.
-                max_tokens=16384,
+                max_tokens=DEFAULT_OUTPUT_BUDGET,
                 temperature=self.temperature,
                 **({"web_search": True} if self._web_search else {}),
             )

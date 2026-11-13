@@ -45,12 +45,13 @@ def init_state() -> None:
 
 init_state()
 
-st.title("New Debate")
+st.title("Welcome to OMAS :nerd_face:")
 st.caption(
-    "Enter a topic. Agent 0 assembles the panel, sets the ground rules, and runs the "
-    "debate to a policy brief."
+    "Explore a question with a panel of AI agents guided by Agent 0. "
+    "Add your topic and sources below, then describe the final output you want. "
+    "To begin, describe your topic below, add any source documents you want the panel "
+    "to use, and specify what the final output should cover."
 )
-
 st.divider()
 
 with st.container(border=True):
@@ -94,7 +95,7 @@ with st.container(border=True):
                "PDFs use extracted text only, without images or OCR. ZIP files are read locally, not uploaded to model APIs.")
     uploads = st.file_uploader("Upload source documents", type=["md", "txt", "tex", "bib", "py", "json", "csv", "yaml", "yml", "pdf", "zip"],
                                accept_multiple_files=True, key="shared_document_uploads")
-    from core.documents import document_context, MAX_BYTES
+    from core.documents import document_context, MAX_BYTES, MAX_CHARACTERS
     candidates = []
     if sum(upload.size for upload in uploads) > MAX_BYTES:
         st.error("Uploads exceed 20 MB in total. Remove some files.")
@@ -118,7 +119,7 @@ with st.container(border=True):
             source_context = document_context(shared_documents)
             st.caption(f"{len(shared_documents)} sources, {len(source_context):,} characters. "
                        "Text is sent again with each relevant call and adds input-token costs. "
-                       "The 100,000-character package limit does not guarantee room for a long debate.")
+                       f"The {MAX_CHARACTERS:,}-character package limit is not a model context limit; documents, history and output must fit together.")
         except ValueError as exc:
             st.error(str(exc))
             documents_ready = False

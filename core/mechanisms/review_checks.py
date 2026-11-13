@@ -77,6 +77,8 @@ def unpack_peer_reviews(value, targets, collect_votes):
     if not isinstance(reviews, list):
         raise ValueError("Structured peer review must contain a reviews array")
     result = {}
+    conflicts = set()
+    issues = []
     for index, entry in enumerate(reviews, 1):
         if not isinstance(entry, dict):
             raise ValueError(f"Review entry {index} must be an object")
@@ -85,12 +87,18 @@ def unpack_peer_reviews(value, targets, collect_votes):
             raise ValueError(f"Unexpected reviewed agent at entry {index}: {name!r}. "
                              f"Expected one entry for each of: {list(targets)!r}")
         assessment = {k: v for k, v in entry.items() if k != "agent"}
+        if name in conflicts:
+            continue
         if name in result:
             if result[name] == assessment:
                 continue  # Identical repetition has no effect; raw API text is retained.
-            raise ValueError(f"Conflicting duplicate review for {name!r} at entry {index}. "
-                             "No scores were overwritten or averaged.")
+            del result[name]
+            conflicts.add(name)
+            issues.append(f"Conflicting duplicate review for {name!r}; this target is unavailable. Other reviews are retained.")
+            continue
         result[name] = assessment
+    if issues:
+        result["_validation_errors"] = issues
     if collect_votes:
         result["importance_votes"] = value.get("importance_votes")
     return result

@@ -1,5 +1,5 @@
 """
-core/orchestrator.py
+core/mechanisms/orchestrator.py
 
 Importance-vote Orchestrator for the peer-review OMAS platform.
 
@@ -18,14 +18,16 @@ Update rule (normalized importance votes)
 -------------------------------------------
 Let v_i = agent i's importance vector (sums to 100).
 Let v̄_q  = (1/n) * sum_i v_i_q             (mean vote across agents, sums to 100)
-Let v̂_q  = v̄_q / 100                       (normalised, sums to 1)
+Let v̂_q  = v̄_q / sum_r v̄_r                       (normalised, sums to 1)
 
 New weights before renormalisation:
-    w_q^ECU(t+1) = w_q^ECU(t) + (1/t) * v̂_q
+    z_q = w_q^ECU(c) + (1/(c+1)) * v̂_q, where c is the zero-based cycle.
 
-Then renormalise so sum(w_q^ECU) = initial_sum, applying a feasible minimum weight while preserving the weight total across rounds.
+Then renormalise to the pre-update weight sum, applying a feasible minimum
+weight. With no other weight changes, repeated updates preserve the initial
+total up to floating-point precision.
 
-The 1/t step size gives diminishing updates. Importance votes are not an
+The 1/(c+1) step size gives diminishing updates. Importance votes are not an
 estimated objective gradient; no optimality or convergence guarantee is claimed.
 
 Advantages over the earlier sandbox coordinate-search approach:
@@ -122,7 +124,9 @@ class Orchestrator:
             Official ledger; ECU weights updated in-place.
         importance_votes : dict[str, dict[str, float]]
             {agent_name: {dimension: points}} where each agent's points sum to 100.
-            Agents with invalid or zero-sum votes are silently excluded.
+            Non-dictionary and zero-total votes are excluded. The live review
+            parser rejects nonnumeric/nonfinite votes before calling this method;
+            direct callers must supply finite numeric values.
         """
         if not self.enabled:
             return None

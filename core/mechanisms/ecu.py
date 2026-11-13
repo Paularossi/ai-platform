@@ -1,5 +1,5 @@
 """
-core/ecu.py
+core/mechanisms/ecu.py
 
 ECU mechanism — peer review based.
 
@@ -8,9 +8,11 @@ Components
 
   PeerReviewRound
   ---------------
-  Prompts each agent to score all other agents on the four quality
-  dimensions and report a coalition agreement score (0-1) per peer.
-  Returns a list of PeerReviewOutput objects.
+  Prompts each agent to score peers on the supplied dimensions. Consensus
+  scores, when present, provide coalition agreement. Each parse returns one
+  PeerReviewOutput. DEFAULT_DIMENSIONS are generic/manual fallbacks, not
+  Agent 0 mode's active configuration. Agent 0 validates generated dimensions
+  and enforces its agreement-based consensus rubric before construction.
 
   ECU uses the mean of available valid peer scores separately for each
   agent and dimension, weighted by ECU weights. A missing dimension leaves
@@ -48,6 +50,8 @@ from core.mechanisms.review_checks import CHECK_RUBRIC, CHECK_EXAMPLE, validate_
 # Quality dimensions
 # ---------------------------------------------------------------------------
 
+# Generic/manual defaults retained for compatibility. Agent 0 supplies its
+# validated run-specific dimensions, including its fixed consensus rubric.
 DEFAULT_DIMENSIONS: list[dict] = [
     {
         "name": "depth_breadth",
@@ -269,6 +273,10 @@ class PeerReviewRound:
         """
         Parse the agent's raw response into a PeerReviewOutput.
 
+        The dispatcher first converts the API reviews array with
+        unpack_peer_reviews; this parser consumes the resulting target-keyed
+        object. Invalid scores are omitted individually, never imputed.
+
         Coalition scores are derived from the consensus dimension score —
         no separate coalition_agreement field is asked or parsed.
         """
@@ -317,6 +325,8 @@ class PeerReviewRound:
             if not isinstance(parsed, dict):
                 raise ValueError("Peer review must be a JSON object")
 
+            validation_errors.extend(str(issue) for issue in parsed.get("_validation_errors", [])
+                                     if isinstance(issue, str))
             for name in review_targets:
                 entry = parsed.get(name)
                 if not isinstance(entry, dict):

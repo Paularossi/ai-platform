@@ -20,10 +20,11 @@ def render_call_diagnostics(calls, key):
         if c.get("error"):
             st.error(c["error"])
         st.caption(f"Stop reason: {c.get('stop_reason') or 'not reported'} · Duration: {c.get('duration_ms', '?')} ms")
-        for label, field in (("System prompt", "system_prompt"), ("User prompt", "prompt"), ("Response text", "response")):
-            st.markdown(f"**{label}**")
-            st.code(c.get(field) or "(empty)", language=None)
-        st.json({"parameters": c.get("parameters"), "usage": c.get("usage"),
-                 "diagnostics": c.get("diagnostics", {k: c.get(k) for k in ("request_id", "response_id", "block_types", "web_search")})}, expanded=False)
+        if st.checkbox("Show request, response and metadata", key=f"{key}_inspect"):
+            for label, field in (("System prompt", "system_prompt"), ("User prompt", "prompt"), ("Response text", "response")):
+                st.text_area(label, c.get(field) or "(empty)", height=250,
+                             disabled=True, key=f"{key}_{i}_{field}")
+            st.json({"parameters": c.get("parameters"), "usage": c.get("usage"),
+                     "diagnostics": c.get("diagnostics", {k: c.get(k) for k in ("request_id", "response_id", "block_types", "web_search")})}, expanded=False)
         st.download_button("Download API calls (.json)", json.dumps(calls, indent=2, ensure_ascii=False, default=str),
                            file_name="api_calls.json", mime="application/json", key=f"{key}_download")
